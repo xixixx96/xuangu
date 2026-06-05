@@ -1,0 +1,69 @@
+name: 每日选股推送
+
+on:
+  # 定时触发：北京时间每个交易日上午 8:30（UTC 0:30）
+  schedule:
+    # 短线 + 波段（周一至周五）
+    - cron: "30 0 * * 1-5"
+
+  # 允许手动触发
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        required: false
+        default: "daily"
+        type: choice
+        options:
+          - daily
+          - value
+          - all
+
+jobs:
+  stock-pick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # ---------- 短线 + 波段（每日） ----------
+      - name: Run daily (scalping + swing)
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'daily' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          AI_PROVIDER: deepseek
+        run: python src/main.py --mode daily
+
+      # ---------- 价值策略（周一） ----------
+      - name: Run value (Monday only)
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'value' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          AI_PROVIDER: deepseek
+        run: python src/main.py --mode value
+
+      # ---------- 全部三种 ----------
+      - name: Run all
+        if: ${{ github.event.inputs.mode == 'all' }}
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          AI_PROVIDER: deepseek
+        run: python src/main.py --mode all
+
+      - name: Upload report artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stock-reports
+          path: output/
+          retention-days: 7
