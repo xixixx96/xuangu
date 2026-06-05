@@ -11,17 +11,19 @@ with open(r'C:\Users\xixixx96\Claude\xuangu\.env', encoding='utf-8') as f:
 sys.path.insert(0, r'C:\Users\xixixx96\Claude\xuangu\src')
 from push_wechat import push_to_wecom_markdown
 
-msg = """<font color="warning">**企业微信机器人接收消息配置**</font>
+msg = """<font color="warning">**生成 SSH 密钥的方法**</font>
 
-步骤:
-1. 在手机上打开企业微信
-2. 进入选股群聊 -> 右上角三个点 -> 群机器人
-3. 点击你的选股机器人 -> 开启"接收消息"
-4. 复制页面上显示的 Token 和 EncodingAESKey
-5. 把这两个值发给我
+1. 打开 CMD 命令提示符
+2. 粘贴执行:
+> ssh-keygen -t ed25519 -C \"xixixx96@github.com\"
+3. 提示\"Enter file in which to save the key\" 直接回车
+4. 提示\"Enter passphrase\" 直接回车(不设密码)
+5. 提示\"Enter same passphrase again\" 再回车
 
-然后我帮你在本地启动一个回调服务!
-(需要你的电脑保持开机)"""
+完成后，下面这条命令查看你的公钥:
+> type %userprofile%\\.ssh\\id_ed25519.pub
+
+把屏幕上的内容复制下来，发给我。"""
 
 push_to_wecom_markdown(msg)
 print('OK')
