@@ -42,6 +42,7 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           AI_PROVIDER: deepseek
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python src/main.py --mode daily
 
       # ---------- 价值策略（周一） ----------
@@ -50,6 +51,7 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           AI_PROVIDER: deepseek
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python src/main.py --mode value
 
       # ---------- 全部三种 ----------
@@ -58,6 +60,7 @@ jobs:
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           AI_PROVIDER: deepseek
+          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python src/main.py --mode all
 
       - name: Upload report artifacts
