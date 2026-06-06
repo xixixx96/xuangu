@@ -164,11 +164,11 @@ def _calc_company_score(job: dict, status: dict | None) -> int:
     if salary_max >= 40000:
         score += 30
     elif salary_max >= 35000:
-        score += 26
+        score += 25
     elif salary_max >= 30000:
         score += 20
     elif salary_max >= 25000:
-        score += 12
+        score += 15
     else:
         score += 5
 
