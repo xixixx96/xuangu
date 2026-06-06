@@ -9,6 +9,7 @@ on:
 jobs:
   job-push:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: 检出代码（wecom-bot 分支）
@@ -23,13 +24,7 @@ jobs:
           cache: 'pip'
 
       - name: 安装依赖
-        run: |
-          pip install -r requirements.txt
-
-      - name: 安装 Playwright 浏览器
-        run: |
-          playwright install chromium
-          playwright install-deps chromium
+        run: pip install -r requirements.txt
 
       - name: 运行岗位抓取与推送
         run: python run.py
