@@ -34,5 +34,9 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add data/seen_jobs.json data/company_cache.json data/logs/ || true
-          git diff --staged --quiet && echo "SKIP: no changes" || (git commit -m "📊 update records" && git push)
+          git add data/seen_jobs.json data/company_cache.json || true
+          if git diff --cached --quiet; then
+            echo "SKIP: nothing to commit"
+          else
+            git commit -m "📊 update records" && git push
+          fi
