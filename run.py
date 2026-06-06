@@ -255,11 +255,22 @@ SINGLE_PLATFORM_TIMEOUT = 60  # 单平台最多60秒
 
 def _scrape_with_timeout(mod_path: str, cls_name: str) -> list[dict]:
     """带超时的单平台抓取"""
-    import importlib
-    mod = importlib.import_module(mod_path)
-    cls = getattr(mod, cls_name)
-    scraper = cls(min_delay=0.3, max_delay=1.0)
-    return scraper.search_all(TARGET_CITIES, JOB_KEYWORDS)
+    name = cls_name.replace("Scraper", "")
+    logger.info(f"[{name}] 开始...")
+    t0 = time.time()
+    try:
+        import importlib
+        mod = importlib.import_module(mod_path)
+        cls = getattr(mod, cls_name)
+        scraper = cls(min_delay=0.3, max_delay=1.0)
+        results = scraper.search_all(TARGET_CITIES, JOB_KEYWORDS)
+        logger.info(f"[{name}] 完成: {len(results)} 个 ({time.time()-t0:.0f}s)")
+        return results
+    except Exception as e:
+        logger.error(f"[{name}] 异常: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return []
 
 
 def run_daily():
