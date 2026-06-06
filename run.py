@@ -50,94 +50,133 @@ logger = logging.getLogger("bot")
 
 # ============================================================
 #  公司评分引擎
+#
+#  评分权重：
+#    融资轮次 30% + 薪资水平 30% + 行业匹配 30% + 司法扣分 10%
+#  城市限定：上海、杭州、苏州
 # ============================================================
-
-# 融资阶段分数：B轮及以上是好公司的基础门槛
-FUNDING_SCORE = {
-    "已上市": 100,
-    "pre-ipo": 98,
-    "e轮": 95, "e+轮": 96,
-    "d轮": 90, "d+轮": 92,
-    "c轮": 82, "c+轮": 85,
-    "b轮": 70, "b+轮": 75,
-    "a轮": 45, "a+轮": 50,
-    "天使轮": 25, "pre-a轮": 30, "种子轮": 20,
-    "未融资": 0,
-}
 
 
 def _calc_company_score(job: dict, status: dict | None) -> int:
     """
     综合评分 0-100
-    基础分来自 funding，加分项来自薪资、行业匹配度等
+    融资轮次 30% + 薪资水平 30% + 行业匹配 30% + 司法扣分 10%
+    城市限定：上海/杭州/苏州
     """
     score = 0
-
-    # 1. 融资阶段评分 (权重 60%)
-    if status:
-        funding_raw = status.get("funding", "").strip().lower()
-        # 模糊匹配
-        for key, val in sorted(FUNDING_SCORE.items(), key=lambda x: -len(x[0])):
-            if key in funding_raw or funding_raw in key:
-                score += int(val * 0.6)
-                break
-        else:
-            score += 25  # 未知融资阶段给低分
-
-        # 如果预置数据有 score 字段直接用
-        if "score" in status:
-            score = status["score"]
-    else:
-        score += 25  # 无财务数据，偏低
-
-    # 2. 薪资加分 (权重 20%)
-    salary_max = job.get("salary_max", 0)
-    if salary_max >= 50000:
-        score += 20
-    elif salary_max >= 40000:
-        score += 16
-    elif salary_max >= 35000:
-        score += 12
-    elif salary_max >= 30000:
-        score += 8
-    elif salary_max >= 25000:
-        score += 4
-
-    # 3. 岗位匹配加分 (权重 10%)
     title = job.get("title", "")
     desc = job.get("description", "")
+    text = f"{title} {desc}".lower()
 
-    high_match = ["具身智能", "人形机器人", "大模型", "agi", "自动驾驶"]
-    mid_match = ["机器人", "ai产品", "人工智能", "智能硬件", "slam"]
+    # ===== 1. 融资轮次评分 (权重 30%，满分 30) =====
+    if status:
+        funding_raw = status.get("funding", "").strip().lower()
+        if "已上市" in funding_raw:
+            score += 30
+        elif "pre-ipo" in funding_raw:
+            score += 28
+        elif "e" in funding_raw and "轮" in funding_raw:
+            score += 27
+        elif "d" in funding_raw and "轮" in funding_raw:
+            score += 24
+        elif "c" in funding_raw and "轮" in funding_raw:
+            score += 20
+        elif "b" in funding_raw and "轮" in funding_raw:
+            score += 15
+        elif "a" in funding_raw and "轮" in funding_raw:
+            score += 8
+        elif any(k in funding_raw for k in ["天使", "种子", "pre-a"]):
+            score += 4
+        else:
+            score += 6  # 未知融资给基础分
+    else:
+        score += 6
 
-    for kw in high_match:
-        if kw.lower() in (title + desc).lower():
-            score += 6
-            break
-
-    for kw in mid_match:
-        if kw.lower() in (title + desc).lower():
-            score += 3
-            break
-
-    # 4. 城市加分 (权重 5%) - 上海岗位更多更优质
-    city = job.get("city", "")
-    if city == "上海":
-        score += 5
-    elif city == "杭州":
+    # ===== 2. 薪资水平评分 (权重 30%，满分 30) =====
+    salary_max = job.get("salary_max", 0)
+    if salary_max >= 60000:
+        score += 30
+    elif salary_max >= 50000:
+        score += 27
+    elif salary_max >= 40000:
+        score += 23
+    elif salary_max >= 35000:
+        score += 18
+    elif salary_max >= 30000:
+        score += 13
+    elif salary_max >= 25000:
+        score += 8
+    else:
         score += 3
-    elif city == "苏州":
-        score += 1
 
-    # 5. 司法案件扣分
+    # ===== 3. 行业匹配度评分 (权重 30%，满分 30) =====
+    # 关键词匹配，按匹配程度叠加，上限 30
+    match_score = 0
+
+    # 3a. 核心硬匹配（每条 8 分）
+    core_keywords = ["具身智能", "人形机器人", "大模型", "agi", "自动驾驶", "具身", "embodied"]
+    for kw in core_keywords:
+        if kw in text:
+            match_score += 8
+            break  # 命中一个即可
+
+    # 3b. 岗位类型匹配（每条 6 分）
+    job_type_keywords = [
+        "产品经理", "产品总监", "产品负责人",
+        "解决方案工程师", "解决方案架构师", "方案工程师",
+    ]
+    for kw in job_type_keywords:
+        if kw in title:
+            match_score += 6
+            break
+
+    # 3c. 行业广度匹配（每条 5 分）
+    industry_broad = ["机器人", "ai产品", "人工智能", "智能硬件", "slam", "运动控制", "机器视觉"]
+    for kw in industry_broad:
+        if kw in text:
+            match_score += 5
+            break
+
+    # 3d. 技术深度匹配（每条 5 分）
+    tech_keywords = ["深度学习", "强化学习", "transformer", "llm", "感知", "规划", "控制算法"]
+    for kw in tech_keywords:
+        if kw in text:
+            match_score += 5
+            break
+
+    # 3e. 公司领域匹配（每条 3 分）
+    company_domain = ["机器人公司", "自动驾驶", "智能制造", "机器狗", "机械臂"]
+    cinfo = job.get("company_info", "").lower()
+    if any(kw in cinfo for kw in company_domain):
+        match_score += 3
+
+    score += min(30, match_score)  # 行业匹配满分 30
+
+    # ===== 4. 司法案件扣分 (权重 10%，扣分上限 10) =====
     if status:
         lawsuits = status.get("lawsuits", 0)
-        if lawsuits > 3:
-            score -= 10
-        elif lawsuits > 1:
-            score -= 3
+        zhixing = status.get("zhixing", False)
+        abnormal = status.get("abnormal", False)
+        dishonesty = status.get("dishonesty", False)
 
-    return max(0, min(100, score))  # clamp to 0-100
+        deduction = 0
+        if dishonesty:
+            deduction += 10  # 失信直接扣满（但这种情况应该已被排除）
+        elif zhixing:
+            deduction += 8
+        elif abnormal:
+            deduction += 6
+
+        if lawsuits >= 5:
+            deduction += 6
+        elif lawsuits >= 3:
+            deduction += 4
+        elif lawsuits >= 1:
+            deduction += 2
+
+        score -= min(10, deduction)
+
+    return max(0, min(100, score))
 
 
 # ============================================================
