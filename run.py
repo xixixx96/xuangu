@@ -286,13 +286,19 @@ def run_daily():
 
     for platform_name, mod_path, cls_name in SCRAPERS:
         logger.info(f"--- {platform_name} ---")
+        raw = []
         try:
             with ThreadPoolExecutor(max_workers=1) as p:
                 fut = p.submit(_scrape_with_timeout, mod_path, cls_name)
                 raw = fut.result(timeout=SINGLE_PLATFORM_TIMEOUT)
-            logger.info(f"  抓到 {len(raw)} 个原始岗位")
+        except Exception as e:
+            reason = "超时" if "timeout" in str(e).lower() else str(e)[:80]
+            logger.warning(f"  {platform_name} 跳过: {reason}")
 
-            for job in raw:
+        logger.info(f"  抓到 {len(raw)} 个原始岗位")
+
+        for job in raw:
+            try:
                 # 去重（30天窗口 + 本次运行内去重）
                 jid = f"{platform_name}:{job.get('job_id', '')}"
                 if jid in seen_job_ids or is_seen(job, SEEN_JOBS_FILE, DEDUP_DAYS):
@@ -340,11 +346,8 @@ def run_daily():
                 job["company_status"] = status
                 job["_score"] = score
                 candidates.append(job)
-
-        except Exception as e:
-            logger.warning(f"  {platform_name} 异常: {e}")
-            import traceback
-            logger.warning(traceback.format_exc())
+            except Exception as e:
+                logger.warning(f"  处理岗位异常: {e}")
 
     logger.info(f"{'='*40}")
     logger.info(f"Phase 1 完成: {len(candidates)} 个候选 | {excluded_count} 个被财务排除")
