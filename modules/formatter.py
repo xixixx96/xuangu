@@ -31,7 +31,7 @@ def _format_salary(job: dict) -> str:
 
 
 def _format_company_status(status: Optional[dict]) -> str:
-    """格式化公司财务状态"""
+    """格式化公司状态行：融资 + 司法"""
     if status is None:
         return "⏳ 财务状态：待查询"
 
@@ -40,24 +40,37 @@ def _format_company_status(status: Optional[dict]) -> str:
         return f"❌ 财务风险：{status.get('reason', '未知风险')}"
 
     parts = []
+
+    # 融资阶段
+    funding = status.get("funding", "")
+    if funding:
+        parts.append(f"融资{funding}")
+
+    # 注册资本
+    capital = status.get("registered_capital", "")
+    if capital:
+        parts.append(f"注册资本{capital}")
+
+    # 成立时间
+    established = status.get("established", "")
+    if established:
+        parts.append(f"成立于{established}")
+
+    # 司法风险
     lawsuits = status.get("lawsuits", 0)
+    if lawsuits == 0:
+        parts.append("零司法案件 ✅")
+    else:
+        parts.append(f"司法案件 {lawsuits} 条")
+
     abnormal = status.get("abnormal", False)
     zhixing = status.get("zhixing", False)
-    dishonesty = status.get("dishonesty", False)
-
-    if lawsuits > 0:
-        parts.append(f"司法案件 {lawsuits} 条")
-    else:
-        parts.append("司法案件 0 条")
-
     if zhixing:
         parts.append("⚠️被执行人")
-    if dishonesty:
-        parts.append("⚠️失信")
     if abnormal:
         parts.append("⚠️经营异常")
 
-    if len(parts) == 1:
+    if not zhixing and not abnormal:
         parts.append("经营正常 ✅")
 
     return " | ".join(parts)
@@ -98,11 +111,11 @@ def format_daily_report(
     lines.append("")
 
     if excluded_count > 0:
-        lines.append(f"> 📍 {city_str} | 今日筛选到 **{len(jobs)}** 个匹配岗位")
-        lines.append(f"> ⚠️ 已排除财务风险公司岗位 **{excluded_count}** 个")
+        lines.append(f"> 📍 {city_str} | 从 **5 个平台** 中精选 **{len(jobs)}** 个岗位")
+        lines.append(f"> ⚠️ 已排除 **{excluded_count}** 个（重复/低薪/财务风险）")
     else:
-        lines.append(f"> 📍 {city_str} | 今日筛选到 **{len(jobs)}** 个匹配岗位")
-        lines.append(f"> ✅ 所有公司均通过财务健康检查")
+        lines.append(f"> 📍 {city_str} | 从 **5 个平台** 中精选 **{len(jobs)}** 个岗位")
+        lines.append(f"> ✅ 所有推送公司均通过财务健康检查")
 
     lines.append("")
 
