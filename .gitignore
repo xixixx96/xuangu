@@ -8,11 +8,6 @@ build/
 venv/
 .venv/
 
-# 运行时数据（由 GitHub Actions 自动更新）
-data/seen_jobs.json
-data/company_cache.json
-data/logs/
-
 # IDE
 .idea/
 .vscode/
