@@ -40,7 +40,7 @@ def save_report(strategy_name: str, analysis_text: str, date_str: str) -> str:
 # ============================================================
 
 def run_daily():
-    """每个交易日上午推送短线 + 波段"""
+    """每个交易日上午推送 短线 + 波段"""
     if not is_trade_day():
         logger.info("非交易日，跳过推送")
         return
@@ -70,6 +70,37 @@ def run_daily():
         push_strategy_pick(label, emoji, candidates, analysis)
 
     logger.info("每日推送完成")
+
+
+# ============================================================
+# 下午盘中推送（短线更新 + 行情提醒）
+# ============================================================
+
+def run_afternoon():
+    """下午 2:00 推送 行情提醒 + 短线更新"""
+    if not is_trade_day():
+        logger.info("非交易日，跳过下午推送")
+        return
+
+    logger.info("=" * 50)
+    logger.info("开始下午盘中推送 (%s)", datetime.now().strftime("%Y-%m-%d %H:%M"))
+    logger.info("=" * 50)
+
+    results = run_screening(strategies=("scalping",))
+    today_str = datetime.now().strftime("%Y%m%d")
+
+    candidates = results.get("scalping", [])
+    if not candidates:
+        logger.warning("短线策略无候选标的")
+        return
+
+    logger.info("短线策略候选: %s", [f"{c.code} {c.name}" for c in candidates])
+
+    analysis = call_ai_analysis(candidates, "scalping")
+    save_report("scalping_pm", analysis, today_str)
+    push_strategy_pick("短线交易", "⚡", candidates, analysis)
+
+    logger.info("下午推送完成")
 
 
 # ============================================================
@@ -123,9 +154,9 @@ def main():
     parser = argparse.ArgumentParser(description="A股选股推送")
     parser.add_argument(
         "--mode",
-        choices=["daily", "value", "all"],
+        choices=["daily", "value", "all", "afternoon"],
         default="daily",
-        help="运行模式: daily=短线+波段(默认), value=仅价值, all=全部",
+        help="运行模式: daily=短线+波段(默认), value=仅价值, all=全部, afternoon=下午盘中推送",
     )
     args = parser.parse_args()
 
@@ -135,6 +166,8 @@ def main():
         run_value()
     elif args.mode == "all":
         run_all()
+    elif args.mode == "afternoon":
+        run_afternoon()
     else:
         logger.error("未知模式: %s", args.mode)
         sys.exit(1)

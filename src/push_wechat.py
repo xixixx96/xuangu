@@ -135,6 +135,7 @@ def push_strategy_pick(
     # 策略颜色
     strategy_colors = {
         "短线交易": "warning",
+        "短线交易(盘中)": "warning",
         "波段操作": "info",
         "价值投资": "comment",
     }
