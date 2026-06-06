@@ -250,7 +250,7 @@ SCRAPERS = [
     ("智联招聘", "scrapers.zhilian", "ZhilianScraper"),
 ]
 
-SINGLE_PLATFORM_TIMEOUT = 60  # 单平台最多60秒
+SINGLE_PLATFORM_TIMEOUT = 120  # 单平台最多120秒
 
 
 def _scrape_with_timeout(mod_path: str, cls_name: str) -> list[dict]:
