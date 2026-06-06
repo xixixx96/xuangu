@@ -52,16 +52,82 @@ logger = logging.getLogger("bot")
 #  公司评分引擎
 #
 #  评分权重：
-#    融资轮次 30% + 薪资水平 30% + 行业匹配 30% + 司法扣分 (上限5%)
-#  B轮 ≧ 已上市 > A轮，40K以上薪资满分
+#    融资轮次 30% + 薪资水平 30% + 行业匹配 30% + 司法扣分 5% + 投资机构 5%
+#  B轮=30 > C轮=28 > 上市=25 > A轮=15，40K+薪资满分
+#  方向：具身智能 > 车企解决方案 > AI/大模型（排除自动驾驶）
 #  城市限定：上海、杭州、苏州
+#  失信/被执行公司直接跳过，不进入候选
 # ============================================================
+
+# 顶级VC + 产业资本名录
+TOP_INVESTORS = [
+    "红杉", "高瓴", "idg", "经纬", "蓝驰", "源码", "五源", "高榕", "真格",
+    "启明", "ggv", "dst", "淡马锡", "软银", "今日资本", "创新工场",
+    "顺为", "云锋", "baillie", "accel", "鼎晖", "深创投", "元禾",
+    # 产业资本
+    "腾讯", "阿里巴巴", "阿里", "百度", "字节", "美团", "小米", "华为",
+    "比亚迪", "宁德时代", "上汽", "丰田", "奔驰", "博世", "菜鸟",
+    "联想创投", "复星", "国投", "国开",
+]
+
+
+def _has_top_investors(investors_str: str) -> bool:
+    if not investors_str:
+        return False
+    s = investors_str.lower()
+    return any(i.lower() in s for i in TOP_INVESTORS)
+
+
+def _gen_push_reason(job: dict, status: dict | None, score: int) -> str:
+    """生成推送理由"""
+    parts = []
+
+    # 行业方向
+    title = job.get("title", "")
+    if any(kw in title for kw in ["具身智能", "人形机器人", "embodied"]):
+        parts.append("具身智能核心岗位")
+    elif any(kw in title for kw in ["解决方案工程师", "解决方案架构师", "方案工程师"]):
+        parts.append("解决方案岗位，匹配你背景")
+    elif any(kw in title for kw in ["产品经理", "产品总监"]):
+        parts.append("AI产品岗位")
+
+    # 融资信息
+    if status:
+        funding = status.get("funding", "")
+        funding_amount = status.get("funding_amount", "")
+        if funding and funding_amount:
+            parts.append(f"{funding}（{funding_amount}）")
+        elif funding:
+            parts.append(f"{funding}")
+
+        # 知名投资机构
+        investors = status.get("investors", "")
+        if investors and _has_top_investors(investors):
+            parts.append(f"🏆 顶级机构背书：{investors}")
+
+    # 薪资优势
+    salary_max = job.get("salary_max", 0)
+    if salary_max >= 40000:
+        parts.append("高薪岗位（40K+）")
+    elif salary_max >= 30000:
+        parts.append("薪资有竞争力")
+
+    # 公司稳定性
+    if status:
+        lawsuits = status.get("lawsuits", 0)
+        if lawsuits == 0:
+            parts.append("零司法风险")
+        elif lawsuits <= 2:
+            parts.append("司法风险极低")
+
+    reason = "；".join(parts) if parts else "综合评分优秀"
+    return reason
 
 
 def _calc_company_score(job: dict, status: dict | None) -> int:
     """
     综合评分 0-100
-    融资 30% + 薪资 30% + 行业 30% + 司法扣分(上限5)
+    融资 30% + 薪资 30% + 行业 30% + 司法扣分 5% + 投资机构 5%
     """
     score = 0
     title = job.get("title", "")
@@ -69,36 +135,34 @@ def _calc_company_score(job: dict, status: dict | None) -> int:
     text = f"{title} {desc}".lower()
 
     # ===== 1. 融资轮次评分 (满分 30) =====
-    # B轮评分最高（成长期确定性最强），上市次之，A轮居三
     if status:
         funding_raw = status.get("funding", "").strip().lower()
 
         if "b" in funding_raw and ("轮" in funding_raw or "+" in funding_raw):
-            score += 30      # B轮：满分，成长期确定性最强
+            score += 30      # B轮：产品验证+资金充足+高增长
         elif "c" in funding_raw and ("轮" in funding_raw or "+" in funding_raw):
             score += 28      # C轮
         elif "已上市" in funding_raw:
-            score += 26      # 上市公司：稳定但增长空间可能有限
+            score += 25      # 上市：最不会倒，增长空间略低
         elif "d" in funding_raw and ("轮" in funding_raw or "+" in funding_raw):
             score += 25      # D轮
         elif "e" in funding_raw and ("轮" in funding_raw or "+" in funding_raw):
-            score += 23      # E轮/Pre-IPO
+            score += 23
         elif "pre-ipo" in funding_raw:
             score += 22
         elif "a" in funding_raw and ("轮" in funding_raw or "+" in funding_raw):
-            score += 15      # A轮：早期但已有验证
+            score += 15      # A轮：早期但已验证
         elif any(k in funding_raw for k in ["天使", "种子", "pre-a"]):
-            score += 5       # 极早期，风险高
+            score += 5
         else:
-            score += 10      # 未知融资
+            score += 10
     else:
         score += 10
 
     # ===== 2. 薪资水平评分 (满分 30) =====
-    # ≥40K 即是满分，代表岗位价值高
     salary_max = job.get("salary_max", 0)
     if salary_max >= 40000:
-        score += 30           # 40K+ 满分
+        score += 30
     elif salary_max >= 35000:
         score += 26
     elif salary_max >= 30000:
@@ -106,33 +170,36 @@ def _calc_company_score(job: dict, status: dict | None) -> int:
     elif salary_max >= 25000:
         score += 12
     else:
-        score += 5            # 低于25K给最低分
+        score += 5
 
     # ===== 3. 行业匹配度评分 (满分 30) =====
     match_score = 0
 
-    # 3a. 核心领域匹配（每条 10 分）
+    # 3a. 核心领域-具身智能（10分）
     core_kw = ["具身智能", "人形机器人", "embodied", "具身"]
     for kw in core_kw:
         if kw in text:
             match_score += 10
             break
 
-    # 3b. AI/机器人广度（每条 7 分）
-    ai_kw = ["大模型", "agi", "自动驾驶", "机器人", "人工智能", "深度学习"]
+    # 3b. AI/机器人广度（7分）
+    ai_kw = ["大模型", "agi", "机器人", "人工智能", "深度学习", "智能硬件"]
     for kw in ai_kw:
         if kw in text:
             match_score += 7
             break
 
-    # 3c. 岗位类型匹配（每条 7 分）
-    job_kw = ["产品经理", "产品总监", "产品负责人", "解决方案工程师", "解决方案架构师", "方案工程师"]
+    # 3c. 岗位类型匹配（7分）
+    job_kw = [
+        "解决方案工程师", "解决方案架构师", "方案工程师",
+        "产品经理", "产品总监", "产品负责人",
+    ]
     for kw in job_kw:
         if kw in title:
             match_score += 7
             break
 
-    # 3d. 技术关键词（每条 6 分）
+    # 3d. 技术关键词（6分）
     tech_kw = ["slam", "运动控制", "机器视觉", "强化学习", "transformer", "llm", "感知算法", "规划控制"]
     for kw in tech_kw:
         if kw in text:
@@ -141,15 +208,11 @@ def _calc_company_score(job: dict, status: dict | None) -> int:
 
     score += min(30, match_score)
 
-    # ===== 4. 司法扣分 (上限 5 分) =====
+    # ===== 4. 司法扣分 (上限 5) =====
     if status:
         lawsuits = status.get("lawsuits", 0)
         deduction = 0
-        if status.get("dishonesty"):
-            deduction += 5
-        elif status.get("zhixing"):
-            deduction += 4
-        elif status.get("abnormal"):
+        if status.get("abnormal"):
             deduction += 3
         if lawsuits >= 5:
             deduction += 3
@@ -158,6 +221,19 @@ def _calc_company_score(job: dict, status: dict | None) -> int:
         elif lawsuits >= 1:
             deduction += 1
         score -= min(5, deduction)
+
+    # ===== 5. 知名投资机构加分 (上限 5) =====
+    if status:
+        investors = status.get("investors", "")
+        if _has_top_investors(investors):
+            # 多个顶级机构多加
+            count = sum(1 for i in TOP_INVESTORS if i.lower() in investors.lower())
+            if count >= 3:
+                score += 5
+            elif count >= 2:
+                score += 4
+            elif count >= 1:
+                score += 2
 
     return max(0, min(100, score))
 
@@ -225,20 +301,22 @@ def run_daily():
                 if not company:
                     continue
 
-                if company not in seen_companies:
-                    status = check_company(company)
-                    seen_companies.add(company)
-                else:
-                    # 同一家公司已查过，用缓存
-                    status = None  # 会在下面从缓存读
-
-                # 重新获取状态（确保同一 run 内复用）
                 status = check_company(company)  # check_company 自带缓存
 
-                if status and status.get("excluded"):
-                    excluded_count += 1
-                    logger.info(f"  ❌ {company}: {status.get('reason', '风险')}")
-                    continue
+                # 硬排除：失信 / 被执行 直接跳过
+                if status:
+                    if status.get("dishonesty"):
+                        excluded_count += 1
+                        logger.info(f"  ❌ {company}: 失信被执行人，直接排除")
+                        continue
+                    if status.get("zhixing"):
+                        excluded_count += 1
+                        logger.info(f"  ❌ {company}: 有被执行记录，直接排除")
+                        continue
+                    if status.get("excluded"):
+                        excluded_count += 1
+                        logger.info(f"  ❌ {company}: {status.get('reason', '财务风险')}")
+                        continue
 
                 # 计算评分
                 score = _calc_company_score(job, status)
@@ -295,6 +373,10 @@ def run_daily():
             final_picks.append(job)
         if len(final_picks) >= 3:
             break
+
+    # 为精选岗位生成推送理由
+    for job in final_picks:
+        job["_reason"] = _gen_push_reason(job, job.get("company_status"), job["_score"])
 
     # 打印精选结果
     logger.info(f"Phase 2 精选:")
