@@ -37,6 +37,8 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/xixixx96/xuangu.git
+          git fetch origin wecom-bot
+          git checkout wecom-bot
           git add data/seen_jobs.json data/company_cache.json data/logs/
           git diff --staged --quiet || git commit -m "📊 更新推送记录 [skip ci]"
           git push origin wecom-bot
