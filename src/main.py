@@ -77,7 +77,7 @@ def run_daily():
 # ============================================================
 
 def run_afternoon():
-    """下午 2:00 推送 行情提醒 + 短线更新"""
+    """下午 2:00 推送 行情提醒 + 短线更新 + 波段更新"""
     if not is_trade_day():
         logger.info("非交易日，跳过下午推送")
         return
@@ -86,19 +86,20 @@ def run_afternoon():
     logger.info("开始下午盘中推送 (%s)", datetime.now().strftime("%Y-%m-%d %H:%M"))
     logger.info("=" * 50)
 
-    results = run_screening(strategies=("scalping",))
+    results = run_screening(strategies=("scalping", "swing"))
     today_str = datetime.now().strftime("%Y%m%d")
 
-    candidates = results.get("scalping", [])
-    if not candidates:
-        logger.warning("短线策略无候选标的")
-        return
+    for strategy_key, emoji, label in [("scalping", "⚡", "短线交易"), ("swing", "📈", "波段操作")]:
+        candidates = results.get(strategy_key, [])
+        if not candidates:
+            logger.warning("%s 策略无候选标的", label)
+            continue
 
-    logger.info("短线策略候选: %s", [f"{c.code} {c.name}" for c in candidates])
+        logger.info("%s 策略候选: %s", label, [f"{c.code} {c.name}" for c in candidates])
 
-    analysis = call_ai_analysis(candidates, "scalping")
-    save_report("scalping_pm", analysis, today_str)
-    push_strategy_pick("短线交易", "⚡", candidates, analysis)
+        analysis = call_ai_analysis(candidates, strategy_key)
+        save_report(f"{strategy_key}_pm", analysis, today_str)
+        push_strategy_pick(label, emoji, candidates, analysis)
 
     logger.info("下午推送完成")
 
