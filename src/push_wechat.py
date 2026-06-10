@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # ==================== 企业微信群机器人 Webhook ====================
 
-_WECOM_WEBHOOK = os.getenv("WECOM_WEBHOOK", "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=c0fdbe26-a140-481c-afaf-edc175b570dd")
+_WECOM_WEBHOOK = "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=c0fdbe26-a140-481c-afaf-edc175b570dd"
 
 
 def push_to_wecom_markdown(full_text: str) -> bool:

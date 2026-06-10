@@ -7,6 +7,7 @@
 
 import json
 import logging
+import sys
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -115,73 +116,94 @@ def _fetch_from_eastmoney_direct() -> pd.DataFrame:
     """
     直接请求东方财富全 A 股行情 API（与 akshare 同源）。
     盘前调用时返回的是前一日收盘数据。
+    带浏览器 UA / Referer，防止被反爬拦截。
     """
-    try:
-        params = {
-            "pn": "1",
-            "pz": "10000",
-            "po": "1",
-            "np": "1",
-            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
-            "fltt": "2",
-            "invt": "2",
-            "fid": "f3",
-            "fs": _EASTMONEY_FS,
-            "fields": _EASTMONEY_FIELDS,
-        }
-        resp = requests.get(_EASTMONEY_SPOT_URL, params=params, timeout=60)
-        resp.raise_for_status()
-        data = resp.json()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "http://quote.eastmoney.com/",
+    }
+    params = {
+        "pn": "1",
+        "pz": "10000",
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": _EASTMONEY_FS,
+        "fields": _EASTMONEY_FIELDS,
+    }
 
-        items = data.get("data", {}).get("diff", [])
-        if not items:
-            logger.warning("东财直连返回空数据")
-            return pd.DataFrame()
+    # 尝试多个东财节点（有时某个节点不可用）
+    urls = [
+        "http://push2.eastmoney.com/api/qt/clist/get",
+        "http://82.push2.eastmoney.com/api/qt/clist/get",
+    ]
 
-        # 字段映射: API field -> 中文列名
-        field_map = {
-            "f2": "最新价",
-            "f3": "涨跌幅",
-            "f4": "涨跌额",
-            "f5": "成交量",
-            "f6": "成交额",
-            "f7": "振幅",
-            "f8": "换手率",
-            "f9": "动态市盈率",
-            "f10": "量比",
-            "f12": "代码",
-            "f13": "市场",
-            "f14": "名称",
-            "f15": "最高",
-            "f16": "最低",
-            "f17": "今开",
-            "f18": "昨收",
-            "f20": "总市值",
-            "f21": "流通市值",
-        }
+    for url in urls:
+        try:
+            logger.info("东财直连尝试: %s ...", url[:40])
+            resp = requests.get(url, params=params, headers=headers, timeout=90)
+            resp.raise_for_status()
+            data = resp.json()
 
-        rows = []
-        for item in items:
-            row = {}
-            for key, chinese in field_map.items():
-                row[chinese] = item.get(key)
-            rows.append(row)
+            items = data.get("data", {}).get("diff", [])
+            if not items:
+                logger.warning("东财节点 %s 返回空数据", url[:40])
+                continue
 
-        df = pd.DataFrame(rows)
-        if df.empty:
-            return df
+            # 字段映射: API field → 中文列名
+            field_map = {
+                "f2": "最新价",
+                "f3": "涨跌幅",
+                "f4": "涨跌额",
+                "f5": "成交量",
+                "f6": "成交额",
+                "f7": "振幅",
+                "f8": "换手率",
+                "f9": "动态市盈率",
+                "f10": "量比",
+                "f12": "代码",
+                "f13": "市场",
+                "f14": "名称",
+                "f15": "最高",
+                "f16": "最低",
+                "f17": "今开",
+                "f18": "昨收",
+                "f20": "总市值",
+                "f21": "流通市值",
+            }
 
-        result = _parse_spot_df(df)
-        # 如果 close 为 0（盘前可能），用昨收填充
-        if "close" in result.columns and "pre_close" in result.columns:
-            mask = result["close"] == 0
-            result.loc[mask, "close"] = result.loc[mask, "pre_close"]
+            rows = []
+            for item in items:
+                row = {}
+                for key, chinese in field_map.items():
+                    row[chinese] = item.get(key)
+                rows.append(row)
 
-        return result
+            df = pd.DataFrame(rows)
+            if df.empty:
+                continue
 
-    except Exception:
-        logger.exception("东财直连失败")
-        return pd.DataFrame()
+            result = _parse_spot_df(df)
+            # 如果 close 为 0（盘前可能），用昨收填充
+            if "close" in result.columns and "pre_close" in result.columns:
+                mask = result["close"] == 0
+                result.loc[mask, "close"] = result.loc[mask, "pre_close"]
+
+            logger.info("东财直连成功 (节点 %s)，共 %d 条", url[:40], len(result))
+            return result
+
+        except Exception as e:
+            logger.warning("东财节点 %s 失败: %s", url[:40], str(e))
+
+    logger.error("所有东财节点均失败")
+    return pd.DataFrame()
 
 
 
