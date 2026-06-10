@@ -1,8 +1,7 @@
 """
-数据采集模块 —— 基于 akshare 获取 A 股行情与财务数据
+数据采集模块 - 基于腾讯/新浪 A 股行情与财务数据
 
-早盘推送（8:30）使用前一个交易日收盘数据做初筛，
-通过 akshare spot API + 东财直连双路径保障数据可用性。
+数据源: 腾讯 qt.gtimg.cn -> 新浪 hq.sinajs.cn -> akshare -> 东财直连
 """
 
 import json
@@ -17,16 +16,17 @@ import requests
 
 logger = logging.getLogger(__name__)
 
-# 东财全 A 股行情 API（与 akshare 同源）
 _EASTMONEY_SPOT_URL = "http://push2.eastmoney.com/api/qt/clist/get"
-_EASTMONEY_FIELDS = (
-    "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21"
-)
+_EASTMONEY_FIELDS = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21"
 _EASTMONEY_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 
+_TENCENT_FIELDS = {
+    "name": 1, "code": 2, "close": 3, "pre_close": 4,
+    "open": 5, "volume": 6, "high": 33, "low": 34,
+    "change_pct": 32, "amount": 37, "turnover_rate": 38,
+}
 
 def _safe_float(val, default: float = 0.0) -> float:
-    """安全转换为 float"""
     try:
         return float(val)
     except (ValueError, TypeError):
@@ -34,56 +34,177 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 def fetch_daily_quotes() -> pd.DataFrame:
-    """
-    获取全 A 股行情数据（前一个交易日收盘）
-
-    策略：
-      1. 优先通过 akshare (stock_zh_a_spot_em) 获取，重试 3 次
-      2. 若仍失败，改用 requests 直连东方财富 API
-      3. 全部失败则返回空 DataFrame
-
-    返回 DataFrame，包含: code, name, close, change_pct, turnover_rate,
-                          volume, amount, high, low, open, pre_close
-    """
-    # ---- 路径 1：akshare ----
-    for attempt in range(3):
+    df = _fetch_from_tencent()
+    if not df.empty:
+        logger.info("tencent: %d", len(df))
+        return df
+    df = _fetch_from_sina()
+    if not df.empty:
+        logger.info("sina: %d", len(df))
+        return df
+    for attempt in range(2):
         try:
             import akshare as ak
-
             df = ak.stock_zh_a_spot_em()
             if df is not None and not df.empty:
                 result = _parse_spot_df(df)
                 if not result.empty:
-                    logger.info(
-                        "akshare 行情获取成功 (attempt %d)，共 %d 条",
-                        attempt + 1,
-                        len(result),
-                    )
+                    logger.info("akshare: %d", len(result))
                     return result
-
-            logger.warning("akshare 返回空数据 (attempt %d/3)", attempt + 1)
-            if attempt < 2:
-                time.sleep(10)
-
+            if attempt < 1:
+                time.sleep(8)
         except Exception:
-            logger.warning("akshare 调用异常 (attempt %d/3)", attempt + 1, exc_info=True)
-            if attempt < 2:
-                time.sleep(10)
-
-    # ---- 路径 2：直连东财 API ----
-    logger.warning("akshare 全部失败，切换为东财直连")
+            if attempt < 1:
+                time.sleep(8)
     df = _fetch_from_eastmoney_direct()
     if not df.empty:
-        logger.info("东财直连获取成功，共 %d 条", len(df))
+        logger.info("eastmoney: %d", len(df))
         return df
-
-    logger.error("所有数据源均失败，行情数据为空")
+    logger.error("all sources failed")
     return pd.DataFrame()
 
 
+def _fetch_from_tencent() -> pd.DataFrame:
+    try:
+        codes = _get_stock_list()
+        if not codes:
+            return pd.DataFrame()
+        all_rows = []
+        for i in range(0, len(codes), 80):
+            batch = codes[i:i + 80]
+            tencodes = []
+            cmap = {}
+            for code, name in batch:
+                p = "sh" if code.startswith("6") else "sz"
+                tc = p + code
+                tencodes.append(tc)
+                cmap[tc] = code
+            try:
+                resp = requests.get("http://qt.gtimg.cn/q=" + ",".join(tencodes), timeout=30)
+                resp.encoding = "gbk"
+            except Exception:
+                continue
+            for line in resp.text.strip().split("\n"):
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                try:
+                    parts = line.split('="', 1)
+                    if len(parts) != 2:
+                        continue
+                    key = parts[0].replace("v_", "")
+                    vals = parts[1].strip(';\n').split("~")
+                    if len(vals) < 40:
+                        continue
+                    row = {}
+                    for fn, idx in _TENCENT_FIELDS.items():
+                        row[fn] = vals[idx] if idx < len(vals) else ""
+                    row["code"] = cmap.get(key, row.get("code", ""))
+                    all_rows.append(row)
+                except Exception:
+                    continue
+            time.sleep(0.3)
+        if not all_rows:
+            return pd.DataFrame()
+        return _normalize_quote_df(pd.DataFrame(all_rows))
+    except Exception:
+        logger.exception("tencent error")
+        return pd.DataFrame()
+
+
+def _fetch_from_sina() -> pd.DataFrame:
+    try:
+        codes = _get_stock_list()
+        if not codes:
+            return pd.DataFrame()
+        all_rows = []
+        for i in range(0, len(codes), 200):
+            batch = codes[i:i + 200]
+            sinacodes = []
+            for code, name in batch:
+                p = "sh" if code.startswith("6") else "sz"
+                sinacodes.append(p + code)
+            try:
+                resp = requests.get(
+                    "http://hq.sinajs.cn/list=" + ",".join(sinacodes),
+                    headers={"Referer": "https://finance.sina.com.cn"},
+                    timeout=30,
+                )
+                resp.encoding = "gbk"
+            except Exception:
+                continue
+            for line in resp.text.strip().split("\n"):
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                try:
+                    parts = line.split('="', 1)
+                    if len(parts) != 2:
+                        continue
+                    key = parts[0].replace("var hq_str_", "")
+                    vals = parts[1].strip(';\n').split(",")
+                    if len(vals) < 32 or not vals[0]:
+                        continue
+                    c = _safe_float(vals[3])
+                    pc = _safe_float(vals[2])
+                    chg = round((c - pc) / pc * 100, 2) if pc > 0 else 0.0
+                    all_rows.append({
+                        "code": key, "name": vals[0],
+                        "close": c, "pre_close": pc,
+                        "open": _safe_float(vals[1]),
+                        "high": _safe_float(vals[4]),
+                        "low": _safe_float(vals[5]),
+                        "volume": _safe_float(vals[8]),
+                        "amount": _safe_float(vals[9]) * 10000,
+                        "change_pct": chg,
+                        "turnover_rate": 0.0,
+                    })
+                except Exception:
+                    continue
+            time.sleep(0.3)
+        if not all_rows:
+            return pd.DataFrame()
+        return _normalize_quote_df(pd.DataFrame(all_rows))
+    except Exception:
+        logger.exception("sina error")
+        return pd.DataFrame()
+
+
+def _get_stock_list() -> list:
+    try:
+        import akshare as ak
+        df = ak.stock_info_a_code_name()
+        if df is not None and not df.empty:
+            return list(zip(
+                df["code"].astype(str).str.zfill(6),
+                df["name"],
+            ))
+    except Exception:
+        logger.warning("stock list failed")
+    return []
+
+
+def _normalize_quote_df(df: pd.DataFrame) -> pd.DataFrame:
+    req = {
+        "code": "", "name": "", "close": 0.0, "change_pct": 0.0,
+        "turnover_rate": 0.0, "volume": 0.0, "amount": 0.0,
+        "high": 0.0, "low": 0.0, "open": 0.0, "pre_close": 0.0,
+    }
+    for col, d in req.items():
+        if col not in df.columns:
+            df[col] = d
+    for col in ["close", "change_pct", "turnover_rate", "volume",
+                "high", "low", "open", "pre_close"]:
+        if col in df.columns:
+            df[col] = df[col].apply(_safe_float)
+    df = df[(df["close"] > 0) & (df["code"].notna()) & (df["code"] != "")]
+    keep = ["code", "name", "close", "change_pct", "turnover_rate",
+            "volume", "amount", "high", "low", "open", "pre_close"]
+    return df[[c for c in keep if c in df.columns]].copy()
+
+
 def _parse_spot_df(df: pd.DataFrame) -> pd.DataFrame:
-    """将 akshare / 东财 返回的原始 DataFrame 转成统一格式"""
-    df = df.rename(columns={
+    return _normalize_quote_df(df.rename(columns={
         "代码": "code",
         "名称": "name",
         "最新价": "close",
@@ -95,21 +216,7 @@ def _parse_spot_df(df: pd.DataFrame) -> pd.DataFrame:
         "最低": "low",
         "今开": "open",
         "昨收": "pre_close",
-    })
-
-    keep_cols = [
-        "code", "name", "close", "change_pct", "turnover_rate",
-        "volume", "amount", "high", "low", "open", "pre_close",
-    ]
-    df = df[[c for c in keep_cols if c in df.columns]].copy()
-
-    for col in ["close", "change_pct", "turnover_rate", "volume",
-                "high", "low", "open", "pre_close"]:
-        if col in df.columns:
-            df[col] = df[col].apply(_safe_float)
-
-    df = df[(df["close"] > 0) & (df["code"].notna())]
-    return df
+    }))
 
 
 def _fetch_from_eastmoney_direct() -> pd.DataFrame:
