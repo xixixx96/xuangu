@@ -52,10 +52,10 @@ def fetch_daily_quotes() -> pd.DataFrame:
                     logger.info("akshare: %d", len(result))
                     return result
             if attempt < 1:
-                time.sleep(8)
+                time.sleep(3)
         except Exception:
             if attempt < 1:
-                time.sleep(8)
+                time.sleep(3)
     df = _fetch_from_eastmoney_direct()
     if not df.empty:
         logger.info("eastmoney: %d", len(df))
@@ -103,7 +103,7 @@ def _fetch_from_tencent() -> pd.DataFrame:
                     all_rows.append(row)
                 except Exception:
                     continue
-            time.sleep(0.3)
+            time.sleep(0.05)
         if not all_rows:
             return pd.DataFrame()
         return _normalize_quote_df(pd.DataFrame(all_rows))
@@ -161,7 +161,7 @@ def _fetch_from_sina() -> pd.DataFrame:
                     })
                 except Exception:
                     continue
-            time.sleep(0.3)
+            time.sleep(0.05)
         if not all_rows:
             return pd.DataFrame()
         return _normalize_quote_df(pd.DataFrame(all_rows))
@@ -194,7 +194,7 @@ def _normalize_quote_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = d
     for col in ["close", "change_pct", "turnover_rate", "volume",
-                "high", "low", "open", "pre_close"]:
+                "amount", "high", "low", "open", "pre_close"]:
         if col in df.columns:
             df[col] = df[col].apply(_safe_float)
     df = df[(df["close"] > 0) & (df["code"].notna()) & (df["code"] != "")]
@@ -321,59 +321,121 @@ def fetch_historical_daily(
     retries: int = 2,
 ) -> pd.DataFrame:
     """
-    获取单只股票历史日线数据（含重试）
+    获取单只股票历史日线数据
+    数据源: 新浪 → 腾讯 → akshare
     code: 纯数字代码（如 "600519"）
     """
+    prefix = "sh" if code.startswith("6") else "sz"
+    
+    # ---- 路径 1: 新浪历史 ----
+    try:
+        df = _sina_hist(code, prefix, days)
+        if not df.empty:
+            return df
+    except Exception:
+        logger.debug("sina hist failed for %s", code)
+
+    # ---- 路径 2: 腾讯历史 ----
+    try:
+        df = _tencent_hist(code, prefix, days)
+        if not df.empty:
+            return df
+    except Exception:
+        logger.debug("tencent hist failed for %s", code)
+
+    # ---- 路径 3: akshare stock_zh_a_daily ----
     for attempt in range(retries):
         try:
             import akshare as ak
-
-            start = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
-            end = datetime.now().strftime("%Y%m%d")
-
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period=period,
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-            )
-            if df is None or df.empty:
-                if attempt < retries - 1:
-                    logger.debug("%s 历史日线为空，重试 %d/%d", code, attempt + 1, retries)
-                    continue
-                return pd.DataFrame()
-
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-                "换手率": "turnover_rate",
-            })
-
-            for col in ["open", "close", "high", "low", "volume", "amount"]:
-                if col in df.columns:
-                    df[col] = df[col].apply(_safe_float)
-
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-            return df.tail(days)
-
+            df = ak.stock_zh_a_daily(symbol=f"{prefix}{code}", adjust="qfq")
+            if df is not None and not df.empty:
+                df = df.rename(columns={
+                    "date": "date", "open": "open", "close": "close",
+                    "high": "high", "low": "low", "volume": "volume",
+                })
+                if "amount" in df.columns:
+                    pass  # keep it
+                for col in ["open", "close", "high", "low", "volume"]:
+                    if col in df.columns:
+                        df[col] = df[col].apply(_safe_float)
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.sort_values("date").reset_index(drop=True)
+                return df.tail(days)
         except Exception:
             if attempt < retries - 1:
-                logger.debug("获取 %s 历史日线失败，重试 %d/%d", code, attempt + 1, retries)
                 continue
-            logger.debug("获取 %s 历史日线最终失败", code)
-            return pd.DataFrame()
+    return pd.DataFrame()
 
 
-# ============================================================
-# 财务数据
-# ============================================================
+def _sina_hist(code: str, prefix: str, days: int) -> pd.DataFrame:
+    """从新浪获取历史日线"""
+    import json as _json
+    url = (
+        f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        f"CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=no&datalen={days + 10}"
+    )
+    resp = requests.get(
+        url,
+        headers={"Referer": "https://finance.sina.com.cn"},
+        timeout=15,
+    )
+    resp.encoding = "gbk"
+    data = _json.loads(resp.text)
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+    
+    rows = []
+    for item in data:
+        rows.append({
+            "date": item.get("day", ""),
+            "open": _safe_float(item.get("open")),
+            "high": _safe_float(item.get("high")),
+            "low": _safe_float(item.get("low")),
+            "close": _safe_float(item.get("close")),
+            "volume": _safe_float(item.get("volume")),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    return df.tail(days)
+
+
+def _tencent_hist(code: str, prefix: str, days: int) -> pd.DataFrame:
+    """从腾讯获取历史日线"""
+    import json as _json
+    url = (
+        f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        f"?param={prefix}{code},day,,,{days + 10},qfq"
+    )
+    resp = requests.get(url, timeout=15)
+    data = _json.loads(resp.text)
+    
+    qfqday = data.get("data", {}).get(f"{prefix}{code}", {}).get("qfqday", [])
+    if not qfqday:
+        return pd.DataFrame()
+    
+    rows = []
+    for item in qfqday:
+        if len(item) < 6:
+            continue
+        rows.append({
+            "date": item[0],
+            "open": _safe_float(item[1]),
+            "close": _safe_float(item[2]),
+            "high": _safe_float(item[3]),
+            "low": _safe_float(item[4]),
+            "volume": _safe_float(item[5]),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    return df.tail(days)
+
+
 
 def fetch_financial_data(code: str) -> dict:
     """

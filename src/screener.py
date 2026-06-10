@@ -36,7 +36,7 @@ from fundamentals import score_fundamentals
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 6  # 并发数
+MAX_WORKERS = 10  # 并发数
 
 
 @dataclass
@@ -69,9 +69,9 @@ def run_screening(strategies=None) -> dict:
         logger.error("行情数据为空，终止筛选")
         return {"scalping": [], "swing": [], "value": []}
 
-    # 预过滤
-    quotes = _pre_filter(quotes)
-    logger.info("预过滤后剩余 %d 只标的", len(quotes))
+    # 快筛（秒级，只用收盘快照）
+    quotes = _fast_pre_filter(quotes)
+    logger.info("快筛后剩余 %d 只标的", len(quotes))
 
     results: dict = {s: [] for s in strategies}
 
@@ -111,6 +111,25 @@ def run_screening(strategies=None) -> dict:
 # ============================================================
 # 内部
 # ============================================================
+
+def _fast_pre_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """快筛：仅用收盘快照数据，不拉历史日线，秒级完成"""
+    df = df.copy()
+    # 排除 ST / 退市
+    df = df[~df.apply(lambda r: is_st_stock(r["code"], r["name"]), axis=1)]
+    # 基本有效性
+    df = df[(df["close"] > 0.01) & (df["volume"] > 0)]
+    # 涨跌幅合理区间（排除极端波动）
+    df = df[(df["change_pct"] > -5) & (df["change_pct"] < 15)]
+    # 换手率下限（放宽，0.5%以上即可）
+    df = df[df["turnover_rate"] >= 0.3]
+    # 价格区间
+    df = df[df["close"] >= 2.0]
+    # 成交额（至少 50 万元）
+    df = df[df["amount"] >= 500000]
+    return df
+
+
 
 def _pre_filter(df: pd.DataFrame) -> pd.DataFrame:
     """粗筛：排除 ST、停牌、无效价格"""
