@@ -76,7 +76,7 @@ def run_screening(strategies=None) -> dict:
     results: dict = {s: [] for s in strategies}
 
     # 只做短线/波段需要技术指标（价值策略主要看基本面，但也需要行情价格）
-    codes = quotes[["code", "name", "close", "change_pct", "turnover_rate", "volume"]].to_dict("records")
+    codes = quotes[["code", "name", "close", "change_pct", "turnover_rate", "volume", "total_mv", "circ_mv"]].to_dict("records")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
@@ -279,6 +279,18 @@ def cross_ma5_desc(ma5, ma10, ma20) -> str:
 # 波段策略检查
 # ============================================================
 
+def _check_swing_fundamentals(code: str) -> bool:
+    """波段基本面: ROE > 10%, 营收增长 > 10%"""
+    try:
+        fin = fetch_financial_data(code)
+        roe = fin.get("roe", 0)
+        rg = fin.get("revenue_growth", 0)
+        return roe >= 10.0 and rg >= 10.0
+    except Exception:
+        return True  # 数据不可用时放行，不卡死
+
+
+
 def _check_swing(
     code: str,
     name: str,
@@ -323,6 +335,15 @@ def _check_swing(
     # 5. 成交量/5日均量 1.2-2.0
     vol_ratio = ind.get("vol_vs_5ma", 1.0)
     if not (SWING["min_vol_vs_5ma"] <= vol_ratio <= SWING["max_vol_vs_5ma"]):
+        return None
+
+    # 6. 流通市值 > 50 亿（替代机构持仓检查）
+    circ_mv = row.get("circ_mv", 0)
+    if circ_mv < 50:
+        return None
+
+    # 7. 基本面: ROE > 10%, 营收增长 > 10%
+    if not _check_swing_fundamentals(code):
         return None
 
     # 打分
@@ -409,10 +430,16 @@ def _check_value(row: dict) -> Candidate | None:
     if peg > VALUE["max_peg"]:
         return None
 
-    # 3. ROE > 15%
-    roe = fin.get("roe", 0)
-    if roe < VALUE["min_roe"]:
-        return None
+    # 3. ROE > 15%（连续3年）
+    roe_3y = fin.get("roe_3y", [])
+    if len(roe_3y) >= 3:
+        if not all(r >= VALUE["min_roe"] for r in roe_3y):
+            return None
+    else:
+        # 数据不足3年，用最新年度兜底
+        roe = fin.get("roe", 0)
+        if roe < VALUE["min_roe"]:
+            return None
 
     # 4. 资产负债率 < 50%
     dr = fin.get("debt_ratio", 100)

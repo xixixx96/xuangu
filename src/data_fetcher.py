@@ -24,6 +24,8 @@ _TENCENT_FIELDS = {
     "name": 1, "code": 2, "close": 3, "pre_close": 4,
     "open": 5, "volume": 6, "high": 33, "low": 34,
     "change_pct": 32, "amount": 37, "turnover_rate": 38,
+    "total_mv": 44,       # 总市值（亿）
+    "circ_mv": 45,        # 流通市值（亿）
 }
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -194,12 +196,14 @@ def _normalize_quote_df(df: pd.DataFrame) -> pd.DataFrame:
         if col not in df.columns:
             df[col] = d
     for col in ["close", "change_pct", "turnover_rate", "volume",
-                "amount", "high", "low", "open", "pre_close"]:
+                "amount", "high", "low", "open", "pre_close",
+                "total_mv", "circ_mv"]:
         if col in df.columns:
             df[col] = df[col].apply(_safe_float)
     df = df[(df["close"] > 0) & (df["code"].notna()) & (df["code"] != "")]
     keep = ["code", "name", "close", "change_pct", "turnover_rate",
-            "volume", "amount", "high", "low", "open", "pre_close"]
+            "volume", "amount", "high", "low", "open", "pre_close",
+            "total_mv", "circ_mv"]
     return df[[c for c in keep if c in df.columns]].copy()
 
 
@@ -479,24 +483,35 @@ def fetch_financial_data(code: str) -> dict:
         try:
             fin = ak.stock_financial_abstract_new_ths(symbol=code, indicator="按年度")
             if fin is not None and not fin.empty:
-                # 取最新一个完整年度
-                latest_year = fin["report_date"].max()
-                year_data = fin[fin["report_date"] == latest_year]
-                for _, row in year_data.iterrows():
-                    metric = row["metric_name"]
-                    val = row["value"]
-                    if metric == "index_weighted_avg_roe":
-                        result["roe"] = _safe_float(val)
-                    elif metric == "calculate_parent_holder_net_profit_yoy_growth_ratio":
-                        result["net_profit_growth"] = _safe_float(val)
-                    elif metric == "calculate_operating_income_total_yoy_growth_ratio":
-                        result["revenue_growth"] = _safe_float(val)
-                    elif metric == "sale_gross_margin":
-                        result["gross_margin"] = _safe_float(val)
-                    elif metric == "assets_debt_ratio":
-                        result["debt_ratio"] = _safe_float(val)
-                    elif metric == "index_per_operating_cash_flow_net":
-                        result["operating_cf"] = _safe_float(val)
+                # 取最近 3 个完整财年
+                years = sorted(fin["report_date"].unique(), reverse=True)[:3]
+                roe_3y = []
+                for yr in years:
+                    yr_data = fin[fin["report_date"] == yr]
+                    for _, row in yr_data.iterrows():
+                        metric = row["metric_name"]
+                        val = row["value"]
+                        if metric == "index_weighted_avg_roe":
+                            roe_3y.append(_safe_float(val))
+                        elif metric == "calculate_parent_holder_net_profit_yoy_growth_ratio":
+                            if yr == years[0]:  # 只取最新年度
+                                result["net_profit_growth"] = _safe_float(val)
+                        elif metric == "calculate_operating_income_total_yoy_growth_ratio":
+                            if yr == years[0]:
+                                result["revenue_growth"] = _safe_float(val)
+                        elif metric == "sale_gross_margin":
+                            if yr == years[0]:
+                                result["gross_margin"] = _safe_float(val)
+                        elif metric == "assets_debt_ratio":
+                            if yr == years[0]:
+                                result["debt_ratio"] = _safe_float(val)
+                        elif metric == "index_per_operating_cash_flow_net":
+                            if yr == years[0]:
+                                result["operating_cf"] = _safe_float(val)
+                # ROE: 最新年度值 + 3年均值
+                if roe_3y:
+                    result["roe"] = roe_3y[0]  # 最新年度
+                    result["roe_3y"] = roe_3y   # 3年列表
         except Exception:
             logger.debug("获取 %s 财务摘要失败", code)
 
