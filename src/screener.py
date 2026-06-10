@@ -119,14 +119,12 @@ def _fast_pre_filter(df: pd.DataFrame) -> pd.DataFrame:
     df = df[~df.apply(lambda r: is_st_stock(r["code"], r["name"]), axis=1)]
     # 基本有效性
     df = df[(df["close"] > 0.01) & (df["volume"] > 0)]
-    # 涨跌幅合理区间（排除极端波动）
+    # 涨跌幅合理区间（排除极端，正筛会有更严格的2%-9%）
     df = df[(df["change_pct"] > -5) & (df["change_pct"] < 15)]
-    # 换手率下限（放宽，0.5%以上即可）
-    df = df[df["turnover_rate"] >= 0.3]
-    # 价格区间
+    # 换手率 >= 2%（对齐短线策略）
+    df = df[df["turnover_rate"] >= 2.0]
+    # 排除低价垃圾股
     df = df[df["close"] >= 2.0]
-    # 成交额（至少 50 万元）
-    df = df[df["amount"] >= 500000]
     return df
 
 
