@@ -120,7 +120,7 @@ def _fast_pre_filter(df: pd.DataFrame) -> pd.DataFrame:
     # 基本有效性
     df = df[(df["close"] > 0.01) & (df["volume"] > 0)]
     # 涨跌幅合理区间（排除极端，正筛会有更严格的2%-9%）
-    df = df[(df["change_pct"] > -5) & (df["change_pct"] < 15)]
+    df = df[(df["change_pct"] >= 2.0) & (df["change_pct"] <= 9.0)]
     # 换手率 >= 2%（对齐短线策略）
     df = df[df["turnover_rate"] >= 2.0]
     # 排除低价垃圾股
