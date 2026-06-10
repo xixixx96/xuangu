@@ -1,12 +1,9 @@
 name: 每日选股推送
 
 on:
-  # 定时触发：北京时间每个交易日上午 8:30（UTC 0:30）和下午 14:00（UTC 6:00）
+  # 定时触发：北京时间每个交易日上午 8:30（UTC 0:30）
   schedule:
-    # 短线 + 波段（周一至周五 8:30）
     - cron: "30 0 * * 1-5"
-    # 行情提醒 + 短线更新（周一至周五 14:00）
-    - cron: "0 6 * * 1-5"
 
   # 允许手动触发
   workflow_dispatch:
@@ -19,8 +16,6 @@ on:
         options:
           - daily
           - value
-          - all
-          - afternoon
 
 jobs:
   stock-pick:
@@ -39,7 +34,7 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # ---------- 短线 + 波段（每日 8:30） ----------
+      # ---------- 短线 + 波段（每日 8:30）----------
       - name: Run daily (scalping + swing)
         if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'daily' }}
         env:
@@ -48,7 +43,7 @@ jobs:
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python src/main.py --mode daily
 
-      # ---------- 价值策略（周一 8:30） ----------
+      # ---------- 价值策略（周一 8:30）----------
       - name: Run value (Monday only)
         if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'value' }}
         env:
@@ -56,24 +51,6 @@ jobs:
           AI_PROVIDER: deepseek
           WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
         run: python src/main.py --mode value
-
-      # ---------- 下午盘中推送（14:00） ----------
-      - name: Run afternoon (scalping update)
-        if: ${{ github.event_name == 'schedule' || github.event.inputs.mode == 'afternoon' }}
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          AI_PROVIDER: deepseek
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-        run: python src/main.py --mode afternoon
-
-      # ---------- 全部三种 ----------
-      - name: Run all
-        if: ${{ github.event.inputs.mode == 'all' }}
-        env:
-          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
-          AI_PROVIDER: deepseek
-          WECOM_WEBHOOK: ${{ secrets.WECOM_WEBHOOK }}
-        run: python src/main.py --mode all
 
       - name: Upload report artifacts
         if: always()

@@ -1,14 +1,27 @@
 """
 数据采集模块 —— 基于 akshare 获取 A 股行情与财务数据
+
+早盘推送（8:30）使用前一个交易日收盘数据做初筛，
+通过 akshare spot API + 东财直连双路径保障数据可用性。
 """
 
+import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
+
+# 东财全 A 股行情 API（与 akshare 同源）
+_EASTMONEY_SPOT_URL = "http://push2.eastmoney.com/api/qt/clist/get"
+_EASTMONEY_FIELDS = (
+    "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21"
+)
+_EASTMONEY_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
 
 
 def _safe_float(val, default: float = 0.0) -> float:
@@ -19,62 +32,157 @@ def _safe_float(val, default: float = 0.0) -> float:
         return default
 
 
-# ============================================================
-# 行情数据
-# ============================================================
-
 def fetch_daily_quotes() -> pd.DataFrame:
     """
-    获取全 A 股日线行情（昨日收盘数据）
-    返回 DataFrame，包含: 代码, 名称, 最新价, 涨跌幅, 换手率,
-                          成交量, 成交额, 最高, 最低, 开盘, 昨收
+    获取全 A 股行情数据（前一个交易日收盘）
+
+    策略：
+      1. 优先通过 akshare (stock_zh_a_spot_em) 获取，重试 3 次
+      2. 若仍失败，改用 requests 直连东方财富 API
+      3. 全部失败则返回空 DataFrame
+
+    返回 DataFrame，包含: code, name, close, change_pct, turnover_rate,
+                          volume, amount, high, low, open, pre_close
     """
-    try:
-        import akshare as ak
+    # ---- 路径 1：akshare ----
+    for attempt in range(3):
+        try:
+            import akshare as ak
 
-        df = ak.stock_zh_a_spot_em()
-        if df is None or df.empty:
-            logger.warning("akshare 行情数据返回为空")
-            return pd.DataFrame()
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                result = _parse_spot_df(df)
+                if not result.empty:
+                    logger.info(
+                        "akshare 行情获取成功 (attempt %d)，共 %d 条",
+                        attempt + 1,
+                        len(result),
+                    )
+                    return result
 
-        df = df.rename(columns={
-            "代码": "code",
-            "名称": "name",
-            "最新价": "close",
-            "涨跌幅": "change_pct",
-            "换手率": "turnover_rate",
-            "成交量": "volume",
-            "成交额": "amount",
-            "最高": "high",
-            "最低": "low",
-            "今开": "open",
-            "昨收": "pre_close",
-        })
+            logger.warning("akshare 返回空数据 (attempt %d/3)", attempt + 1)
+            if attempt < 2:
+                time.sleep(10)
 
-        keep_cols = [
-            "code", "name", "close", "change_pct", "turnover_rate",
-            "volume", "amount", "high", "low", "open", "pre_close",
-        ]
-        df = df[[c for c in keep_cols if c in df.columns]]
+        except Exception:
+            logger.warning("akshare 调用异常 (attempt %d/3)", attempt + 1, exc_info=True)
+            if attempt < 2:
+                time.sleep(10)
 
-        df["change_pct"] = df["change_pct"].apply(_safe_float)
-        df["turnover_rate"] = df["turnover_rate"].apply(_safe_float)
-        df["volume"] = df["volume"].apply(_safe_float)
-        df["close"] = df["close"].apply(_safe_float)
-        df["high"] = df["high"].apply(_safe_float)
-        df["low"] = df["low"].apply(_safe_float)
-        df["open"] = df["open"].apply(_safe_float)
-        df["pre_close"] = df["pre_close"].apply(_safe_float)
-
-        # 过滤掉无效数据
-        df = df[(df["close"] > 0) & (df["code"].notna())].copy()
-
-        logger.info("行情数据获取成功，共 %d 条记录", len(df))
+    # ---- 路径 2：直连东财 API ----
+    logger.warning("akshare 全部失败，切换为东财直连")
+    df = _fetch_from_eastmoney_direct()
+    if not df.empty:
+        logger.info("东财直连获取成功，共 %d 条", len(df))
         return df
 
+    logger.error("所有数据源均失败，行情数据为空")
+    return pd.DataFrame()
+
+
+def _parse_spot_df(df: pd.DataFrame) -> pd.DataFrame:
+    """将 akshare / 东财 返回的原始 DataFrame 转成统一格式"""
+    df = df.rename(columns={
+        "代码": "code",
+        "名称": "name",
+        "最新价": "close",
+        "涨跌幅": "change_pct",
+        "换手率": "turnover_rate",
+        "成交量": "volume",
+        "成交额": "amount",
+        "最高": "high",
+        "最低": "low",
+        "今开": "open",
+        "昨收": "pre_close",
+    })
+
+    keep_cols = [
+        "code", "name", "close", "change_pct", "turnover_rate",
+        "volume", "amount", "high", "low", "open", "pre_close",
+    ]
+    df = df[[c for c in keep_cols if c in df.columns]].copy()
+
+    for col in ["close", "change_pct", "turnover_rate", "volume",
+                "high", "low", "open", "pre_close"]:
+        if col in df.columns:
+            df[col] = df[col].apply(_safe_float)
+
+    df = df[(df["close"] > 0) & (df["code"].notna())]
+    return df
+
+
+def _fetch_from_eastmoney_direct() -> pd.DataFrame:
+    """
+    直接请求东方财富全 A 股行情 API（与 akshare 同源）。
+    盘前调用时返回的是前一日收盘数据。
+    """
+    try:
+        params = {
+            "pn": "1",
+            "pz": "10000",
+            "po": "1",
+            "np": "1",
+            "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+            "fltt": "2",
+            "invt": "2",
+            "fid": "f3",
+            "fs": _EASTMONEY_FS,
+            "fields": _EASTMONEY_FIELDS,
+        }
+        resp = requests.get(_EASTMONEY_SPOT_URL, params=params, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+
+        items = data.get("data", {}).get("diff", [])
+        if not items:
+            logger.warning("东财直连返回空数据")
+            return pd.DataFrame()
+
+        # 字段映射: API field -> 中文列名
+        field_map = {
+            "f2": "最新价",
+            "f3": "涨跌幅",
+            "f4": "涨跌额",
+            "f5": "成交量",
+            "f6": "成交额",
+            "f7": "振幅",
+            "f8": "换手率",
+            "f9": "动态市盈率",
+            "f10": "量比",
+            "f12": "代码",
+            "f13": "市场",
+            "f14": "名称",
+            "f15": "最高",
+            "f16": "最低",
+            "f17": "今开",
+            "f18": "昨收",
+            "f20": "总市值",
+            "f21": "流通市值",
+        }
+
+        rows = []
+        for item in items:
+            row = {}
+            for key, chinese in field_map.items():
+                row[chinese] = item.get(key)
+            rows.append(row)
+
+        df = pd.DataFrame(rows)
+        if df.empty:
+            return df
+
+        result = _parse_spot_df(df)
+        # 如果 close 为 0（盘前可能），用昨收填充
+        if "close" in result.columns and "pre_close" in result.columns:
+            mask = result["close"] == 0
+            result.loc[mask, "close"] = result.loc[mask, "pre_close"]
+
+        return result
+
     except Exception:
-        logger.exception("获取行情数据失败")
+        logger.exception("东财直连失败")
         return pd.DataFrame()
+
 
 
 def fetch_historical_daily(
