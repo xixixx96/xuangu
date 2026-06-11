@@ -2,9 +2,8 @@
 主入口 —— 编排选股 + AI分析 + 微信推送全流程
 
 用法:
-    python src/main.py                    # 日常推送（短线+波段）
-    python src/main.py --mode value       # 仅价值策略
-    python src/main.py --mode all         # 全部三种策略
+    python src/main.py                    # 早盘推送（短线+波段，基于前日收盘）
+    python src/main.py --mode value       # 仅价值策略（仅周一）
 """
 
 import argparse
@@ -76,37 +75,6 @@ def run_daily():
 # 下午盘中推送（短线更新 + 行情提醒）
 # ============================================================
 
-def run_afternoon():
-    """下午 2:00 推送 行情提醒 + 短线更新 + 波段更新"""
-    if not is_trade_day():
-        logger.info("非交易日，跳过下午推送")
-        return
-
-    logger.info("=" * 50)
-    logger.info("开始下午盘中推送 (%s)", datetime.now().strftime("%Y-%m-%d %H:%M"))
-    logger.info("=" * 50)
-
-    results = run_screening(strategies=("scalping", "swing"))
-    today_str = datetime.now().strftime("%Y%m%d")
-
-    for strategy_key, emoji, label in [("scalping", "⚡", "短线交易"), ("swing", "📈", "波段操作")]:
-        candidates = results.get(strategy_key, [])
-        if not candidates:
-            logger.warning("%s 策略无候选标的", label)
-            continue
-
-        logger.info("%s 策略候选: %s", label, [f"{c.code} {c.name}" for c in candidates])
-
-        analysis = call_ai_analysis(candidates, strategy_key)
-        save_report(f"{strategy_key}_pm", analysis, today_str)
-        push_strategy_pick(label, emoji, candidates, analysis)
-
-    logger.info("下午推送完成")
-
-
-# ============================================================
-# 价值策略（每周一）
-# ============================================================
 
 def run_value():
     """价值策略推送（仅周一执行，一周一次）"""
@@ -141,11 +109,6 @@ def run_value():
 # 全部三种
 # ============================================================
 
-def run_all():
-    """全部三种策略（短线 + 波段 + 价值）"""
-    run_daily()
-    run_value()
-
 
 # ============================================================
 # CLI
@@ -155,9 +118,9 @@ def main():
     parser = argparse.ArgumentParser(description="A股选股推送")
     parser.add_argument(
         "--mode",
-        choices=["daily", "value", "all", "afternoon"],
+        choices=["daily", "value"],
         default="daily",
-        help="运行模式: daily=短线+波段(默认), value=仅价值, all=全部, afternoon=下午盘中推送",
+        help="运行模式: daily=短线+波段(默认), value=仅价值(仅周一)",
     )
     args = parser.parse_args()
 
@@ -165,10 +128,6 @@ def main():
         run_daily()
     elif args.mode == "value":
         run_value()
-    elif args.mode == "all":
-        run_all()
-    elif args.mode == "afternoon":
-        run_afternoon()
     else:
         logger.error("未知模式: %s", args.mode)
         sys.exit(1)
