@@ -75,8 +75,14 @@ def run_screening(strategies=None) -> dict:
 
     results: dict = {s: [] for s in strategies}
 
+    # 确保 total_mv / circ_mv 列存在（部分数据源不提供，默认 0）
+    for col in ["total_mv", "circ_mv"]:
+        if col not in quotes.columns:
+            quotes[col] = 0.0
+
     # 只做短线/波段需要技术指标（价值策略主要看基本面，但也需要行情价格）
-    codes = quotes[["code", "name", "close", "change_pct", "turnover_rate", "volume", "total_mv", "circ_mv"]].to_dict("records")
+    cols = ["code", "name", "close", "change_pct", "turnover_rate", "volume", "total_mv", "circ_mv"]
+    codes = quotes[cols].to_dict("records")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
