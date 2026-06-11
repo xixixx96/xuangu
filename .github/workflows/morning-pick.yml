@@ -15,18 +15,24 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -r requirements.txt
+      - name: Debug info
+        run: |
+          echo "=== Python version ==="
+          python --version
+          echo "=== Installed packages ==="
+          pip list 2>&1 | head -20
       - name: Daily scalping and swing
         env:
           DEEPSEEK_API_KEY: "${{ secrets.DEEPSEEK_API_KEY }}"
           AI_PROVIDER: deepseek
           WECOM_WEBHOOK: "${{ secrets.WECOM_WEBHOOK }}"
-        run: python src/main.py --mode daily
+        run: python -u src/main.py --mode daily
       - name: Value Monday only
         env:
           DEEPSEEK_API_KEY: "${{ secrets.DEEPSEEK_API_KEY }}"
           AI_PROVIDER: deepseek
           WECOM_WEBHOOK: "${{ secrets.WECOM_WEBHOOK }}"
-        run: python src/main.py --mode value
+        run: python -u src/main.py --mode value
       - if: always()
         uses: actions/upload-artifact@v4
         with:
