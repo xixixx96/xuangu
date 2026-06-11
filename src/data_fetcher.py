@@ -36,14 +36,28 @@ def _safe_float(val, default: float = 0.0) -> float:
 
 
 def fetch_daily_quotes() -> pd.DataFrame:
-    df = _fetch_from_tencent()
-    if not df.empty:
-        logger.info("tencent: %d", len(df))
-        return df
-    df = _fetch_from_sina()
-    if not df.empty:
-        logger.info("sina: %d", len(df))
-        return df
+    """获取行情，按优先级尝试多个数据源，每个源尝试2次"""
+    # 源1: 腾讯（换手率+市值最全）
+    for attempt in range(2):
+        df = _fetch_from_tencent()
+        if not df.empty:
+            logger.info("tencent: %d stocks", len(df))
+            return df
+        if attempt < 1:
+            logger.warning("tencent attempt %d failed, retrying...", attempt + 1)
+            time.sleep(3)
+
+    # 源2: 新浪（无换手率但稳定）
+    for attempt in range(2):
+        df = _fetch_from_sina()
+        if not df.empty:
+            logger.info("sina: %d stocks (no turnover rate)", len(df))
+            return df
+        if attempt < 1:
+            logger.warning("sina attempt %d failed, retrying...", attempt + 1)
+            time.sleep(3)
+
+    # 源3: akshare
     for attempt in range(2):
         try:
             import akshare as ak
@@ -51,18 +65,26 @@ def fetch_daily_quotes() -> pd.DataFrame:
             if df is not None and not df.empty:
                 result = _parse_spot_df(df)
                 if not result.empty:
-                    logger.info("akshare: %d", len(result))
+                    logger.info("akshare: %d stocks", len(result))
                     return result
             if attempt < 1:
                 time.sleep(3)
-        except Exception:
+        except Exception as e:
+            logger.warning("akshare attempt %d failed: %s", attempt + 1, e)
             if attempt < 1:
                 time.sleep(3)
-    df = _fetch_from_eastmoney_direct()
-    if not df.empty:
-        logger.info("eastmoney: %d", len(df))
-        return df
-    logger.error("all sources failed")
+
+    # 源4: 东财直连
+    for attempt in range(2):
+        df = _fetch_from_eastmoney_direct()
+        if not df.empty:
+            logger.info("eastmoney: %d stocks", len(df))
+            return df
+        if attempt < 1:
+            logger.warning("eastmoney attempt %d failed, retrying...", attempt + 1)
+            time.sleep(5)
+
+    logger.error("all 4 sources failed after retries")
     return pd.DataFrame()
 
 
@@ -173,16 +195,21 @@ def _fetch_from_sina() -> pd.DataFrame:
 
 
 def _get_stock_list() -> list:
-    try:
-        import akshare as ak
-        df = ak.stock_info_a_code_name()
-        if df is not None and not df.empty:
-            return list(zip(
-                df["code"].astype(str).str.zfill(6),
-                df["name"],
-            ))
-    except Exception:
-        logger.warning("stock list failed")
+    """获取A股列表，带重试"""
+    for attempt in range(3):
+        try:
+            import akshare as ak
+            df = ak.stock_info_a_code_name()
+            if df is not None and not df.empty:
+                return list(zip(
+                    df["code"].astype(str).str.zfill(6),
+                    df["name"],
+                ))
+        except Exception as e:
+            logger.warning("stock list attempt %d failed: %s", attempt + 1, e)
+            if attempt < 2:
+                time.sleep(3)
+    logger.error("stock list failed after 3 attempts")
     return []
 
 
