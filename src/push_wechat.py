@@ -28,10 +28,10 @@ def push_to_wecom_markdown(full_text: str) -> bool:
         )
         result = r.json()
         if result.get("errcode") == 0:
-            logger.info("企业微信推送成功")
+            logger.info("企业微信推送成功 (webhook key=%s...)", _WECOM_WEBHOOK.split("key=")[-1][:8])
             return True
         else:
-            logger.error("企业微信推送失败: %s", result)
+            logger.error("企业微信推送失败: errcode=%s errmsg=%s", result.get("errcode"), result.get("errmsg"))
             return False
     except Exception:
         logger.exception("企业微信推送网络异常")

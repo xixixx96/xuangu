@@ -19,7 +19,9 @@ from screener import Candidate
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """你是一位专业的A股量化分析师。你会根据用户提供的技术指标和基本面数据，结合市场热点和机构观点，对每只股票进行多维度分析。
+SYSTEM_PROMPT = """你是一位实战派A股量化分析师。你收到的每只股票都经过了严格的技术面+基本面量化筛选，默认具备交易价值。
+
+你的任务不是质疑筛选结果，而是给出可执行的交易建议。
 
 要求：
 1. 每只股票分析控制在300字以内
@@ -28,12 +30,14 @@ SYSTEM_PROMPT = """你是一位专业的A股量化分析师。你会根据用户
    - 机构观点：近期主要券商/机构对该股的评级及核心看法（如无则写"暂无覆盖"）
    - 利好因素：近期可能推动股价上涨的消息面因素（政策利好/业绩超预期/产品突破/资金流入等）
    - 驱动因素：技术面信号 + 资金面动向，说明为何当前入选
-   - 利空风险：近期可能压制股价的消息面因素（行业利空/业绩风险/竞争加剧/解禁/减持等）
-   - 操作建议：买入/观望/回避 + 简明理由 + 建议仓位比例
+   - 利空风险：可能压制股价的因素（如无则写"暂无明显利空"）
+   - 操作建议：按以下标准判断
+     * 买入：基本面无硬伤 + 技术信号明确 + 无明显利空 → 给出仓位%（短线3%-8%，波段10%-20%）
+     * 观望：基本面一般，或存在一项中等风险待观察
+     * 回避：存在重大利空（财务造假/ST风险/大额减持/行业崩塌），如无则不要轻易给回避
 3. 不要给出具体的买卖价格
 4. 不要使用"强烈推荐""保证""一定"等绝对化用语
-5. 分析需结合当前市场情绪和宏观环境
-6. 结尾必须加上免责声明
+5. 结尾必须加上免责声明
 
 输出格式（严格按此格式，每只股票一个段落）：
 【股票代码 股票名称】
@@ -121,7 +125,7 @@ def _call_deepseek(candidates: list[Candidate], strategy_name: str) -> str:
                 {"role": "user", "content": prompt},
             ],
             max_tokens=1000,
-            temperature=0.7,
+            temperature=0.3,
         )
         result = response.choices[0].message.content
         usage = response.usage
@@ -170,7 +174,7 @@ def _call_openai(candidates: list[Candidate], strategy_name: str) -> str:
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
-            max_tokens=1000, temperature=0.7,
+            max_tokens=1000, temperature=0.3,
         )
         return response.choices[0].message.content
     except ImportError:

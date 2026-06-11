@@ -1,80 +1,321 @@
 """
-数据采集模块 —— 基于 akshare 获取 A 股行情与财务数据
+数据采集模块 - 基于腾讯/新浪 A 股行情与财务数据
+
+数据源: 腾讯 qt.gtimg.cn -> 新浪 hq.sinajs.cn -> akshare -> 东财直连
 """
 
+import json
 import logging
+import sys
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
 import pandas as pd
+import requests
 
 logger = logging.getLogger(__name__)
 
+_EASTMONEY_SPOT_URL = "http://push2.eastmoney.com/api/qt/clist/get"
+_EASTMONEY_FIELDS = "f2,f3,f4,f5,f6,f7,f8,f9,f10,f12,f13,f14,f15,f16,f17,f18,f20,f21"
+_EASTMONEY_FS = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23"
+
+_TENCENT_FIELDS = {
+    "name": 1, "code": 2, "close": 3, "pre_close": 4,
+    "open": 5, "volume": 6, "high": 33, "low": 34,
+    "change_pct": 32, "amount": 37, "turnover_rate": 38,
+    "total_mv": 44,       # 总市值（亿）
+    "circ_mv": 45,        # 流通市值（亿）
+}
 
 def _safe_float(val, default: float = 0.0) -> float:
-    """安全转换为 float"""
     try:
         return float(val)
     except (ValueError, TypeError):
         return default
 
 
-# ============================================================
-# 行情数据
-# ============================================================
-
 def fetch_daily_quotes() -> pd.DataFrame:
-    """
-    获取全 A 股日线行情（昨日收盘数据）
-    返回 DataFrame，包含: 代码, 名称, 最新价, 涨跌幅, 换手率,
-                          成交量, 成交额, 最高, 最低, 开盘, 昨收
-    """
+    df = _fetch_from_tencent()
+    if not df.empty:
+        logger.info("tencent: %d", len(df))
+        return df
+    df = _fetch_from_sina()
+    if not df.empty:
+        logger.info("sina: %d", len(df))
+        return df
+    for attempt in range(2):
+        try:
+            import akshare as ak
+            df = ak.stock_zh_a_spot_em()
+            if df is not None and not df.empty:
+                result = _parse_spot_df(df)
+                if not result.empty:
+                    logger.info("akshare: %d", len(result))
+                    return result
+            if attempt < 1:
+                time.sleep(3)
+        except Exception:
+            if attempt < 1:
+                time.sleep(3)
+    df = _fetch_from_eastmoney_direct()
+    if not df.empty:
+        logger.info("eastmoney: %d", len(df))
+        return df
+    logger.error("all sources failed")
+    return pd.DataFrame()
+
+
+def _fetch_from_tencent() -> pd.DataFrame:
+    try:
+        codes = _get_stock_list()
+        if not codes:
+            return pd.DataFrame()
+        all_rows = []
+        for i in range(0, len(codes), 80):
+            batch = codes[i:i + 80]
+            tencodes = []
+            cmap = {}
+            for code, name in batch:
+                p = "sh" if code.startswith("6") else "sz"
+                tc = p + code
+                tencodes.append(tc)
+                cmap[tc] = code
+            try:
+                resp = requests.get("http://qt.gtimg.cn/q=" + ",".join(tencodes), timeout=30)
+                resp.encoding = "gbk"
+            except Exception:
+                continue
+            for line in resp.text.strip().split("\n"):
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                try:
+                    parts = line.split('="', 1)
+                    if len(parts) != 2:
+                        continue
+                    key = parts[0].replace("v_", "")
+                    vals = parts[1].strip(';\n').split("~")
+                    if len(vals) < 40:
+                        continue
+                    row = {}
+                    for fn, idx in _TENCENT_FIELDS.items():
+                        row[fn] = vals[idx] if idx < len(vals) else ""
+                    row["code"] = cmap.get(key, row.get("code", ""))
+                    all_rows.append(row)
+                except Exception:
+                    continue
+            time.sleep(0.05)
+        if not all_rows:
+            return pd.DataFrame()
+        return _normalize_quote_df(pd.DataFrame(all_rows))
+    except Exception:
+        logger.exception("tencent error")
+        return pd.DataFrame()
+
+
+def _fetch_from_sina() -> pd.DataFrame:
+    try:
+        codes = _get_stock_list()
+        if not codes:
+            return pd.DataFrame()
+        all_rows = []
+        for i in range(0, len(codes), 200):
+            batch = codes[i:i + 200]
+            sinacodes = []
+            for code, name in batch:
+                p = "sh" if code.startswith("6") else "sz"
+                sinacodes.append(p + code)
+            try:
+                resp = requests.get(
+                    "http://hq.sinajs.cn/list=" + ",".join(sinacodes),
+                    headers={"Referer": "https://finance.sina.com.cn"},
+                    timeout=30,
+                )
+                resp.encoding = "gbk"
+            except Exception:
+                continue
+            for line in resp.text.strip().split("\n"):
+                line = line.strip()
+                if not line or "=" not in line:
+                    continue
+                try:
+                    parts = line.split('="', 1)
+                    if len(parts) != 2:
+                        continue
+                    key = parts[0].replace("var hq_str_", "")
+                    vals = parts[1].strip(';\n').split(",")
+                    if len(vals) < 32 or not vals[0]:
+                        continue
+                    c = _safe_float(vals[3])
+                    pc = _safe_float(vals[2])
+                    chg = round((c - pc) / pc * 100, 2) if pc > 0 else 0.0
+                    all_rows.append({
+                        "code": key, "name": vals[0],
+                        "close": c, "pre_close": pc,
+                        "open": _safe_float(vals[1]),
+                        "high": _safe_float(vals[4]),
+                        "low": _safe_float(vals[5]),
+                        "volume": _safe_float(vals[8]),
+                        "amount": _safe_float(vals[9]) * 10000,
+                        "change_pct": chg,
+                        "turnover_rate": 0.0,
+                    })
+                except Exception:
+                    continue
+            time.sleep(0.05)
+        if not all_rows:
+            return pd.DataFrame()
+        return _normalize_quote_df(pd.DataFrame(all_rows))
+    except Exception:
+        logger.exception("sina error")
+        return pd.DataFrame()
+
+
+def _get_stock_list() -> list:
     try:
         import akshare as ak
-
-        df = ak.stock_zh_a_spot_em()
-        if df is None or df.empty:
-            logger.warning("akshare 行情数据返回为空")
-            return pd.DataFrame()
-
-        df = df.rename(columns={
-            "代码": "code",
-            "名称": "name",
-            "最新价": "close",
-            "涨跌幅": "change_pct",
-            "换手率": "turnover_rate",
-            "成交量": "volume",
-            "成交额": "amount",
-            "最高": "high",
-            "最低": "low",
-            "今开": "open",
-            "昨收": "pre_close",
-        })
-
-        keep_cols = [
-            "code", "name", "close", "change_pct", "turnover_rate",
-            "volume", "amount", "high", "low", "open", "pre_close",
-        ]
-        df = df[[c for c in keep_cols if c in df.columns]]
-
-        df["change_pct"] = df["change_pct"].apply(_safe_float)
-        df["turnover_rate"] = df["turnover_rate"].apply(_safe_float)
-        df["volume"] = df["volume"].apply(_safe_float)
-        df["close"] = df["close"].apply(_safe_float)
-        df["high"] = df["high"].apply(_safe_float)
-        df["low"] = df["low"].apply(_safe_float)
-        df["open"] = df["open"].apply(_safe_float)
-        df["pre_close"] = df["pre_close"].apply(_safe_float)
-
-        # 过滤掉无效数据
-        df = df[(df["close"] > 0) & (df["code"].notna())].copy()
-
-        logger.info("行情数据获取成功，共 %d 条记录", len(df))
-        return df
-
+        df = ak.stock_info_a_code_name()
+        if df is not None and not df.empty:
+            return list(zip(
+                df["code"].astype(str).str.zfill(6),
+                df["name"],
+            ))
     except Exception:
-        logger.exception("获取行情数据失败")
-        return pd.DataFrame()
+        logger.warning("stock list failed")
+    return []
+
+
+def _normalize_quote_df(df: pd.DataFrame) -> pd.DataFrame:
+    req = {
+        "code": "", "name": "", "close": 0.0, "change_pct": 0.0,
+        "turnover_rate": 0.0, "volume": 0.0, "amount": 0.0,
+        "high": 0.0, "low": 0.0, "open": 0.0, "pre_close": 0.0,
+    }
+    for col, d in req.items():
+        if col not in df.columns:
+            df[col] = d
+    for col in ["close", "change_pct", "turnover_rate", "volume",
+                "amount", "high", "low", "open", "pre_close",
+                "total_mv", "circ_mv"]:
+        if col in df.columns:
+            df[col] = df[col].apply(_safe_float)
+    df = df[(df["close"] > 0) & (df["code"].notna()) & (df["code"] != "")]
+    keep = ["code", "name", "close", "change_pct", "turnover_rate",
+            "volume", "amount", "high", "low", "open", "pre_close",
+            "total_mv", "circ_mv"]
+    return df[[c for c in keep if c in df.columns]].copy()
+
+
+def _parse_spot_df(df: pd.DataFrame) -> pd.DataFrame:
+    return _normalize_quote_df(df.rename(columns={
+        "代码": "code",
+        "名称": "name",
+        "最新价": "close",
+        "涨跌幅": "change_pct",
+        "换手率": "turnover_rate",
+        "成交量": "volume",
+        "成交额": "amount",
+        "最高": "high",
+        "最低": "low",
+        "今开": "open",
+        "昨收": "pre_close",
+    }))
+
+
+def _fetch_from_eastmoney_direct() -> pd.DataFrame:
+    """
+    直接请求东方财富全 A 股行情 API（与 akshare 同源）。
+    盘前调用时返回的是前一日收盘数据。
+    带浏览器 UA / Referer，防止被反爬拦截。
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Referer": "http://quote.eastmoney.com/",
+    }
+    params = {
+        "pn": "1",
+        "pz": "10000",
+        "po": "1",
+        "np": "1",
+        "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+        "fltt": "2",
+        "invt": "2",
+        "fid": "f3",
+        "fs": _EASTMONEY_FS,
+        "fields": _EASTMONEY_FIELDS,
+    }
+
+    # 尝试多个东财节点（有时某个节点不可用）
+    urls = [
+        "http://push2.eastmoney.com/api/qt/clist/get",
+        "http://82.push2.eastmoney.com/api/qt/clist/get",
+    ]
+
+    for url in urls:
+        try:
+            logger.info("东财直连尝试: %s ...", url[:40])
+            resp = requests.get(url, params=params, headers=headers, timeout=90)
+            resp.raise_for_status()
+            data = resp.json()
+
+            items = data.get("data", {}).get("diff", [])
+            if not items:
+                logger.warning("东财节点 %s 返回空数据", url[:40])
+                continue
+
+            # 字段映射: API field → 中文列名
+            field_map = {
+                "f2": "最新价",
+                "f3": "涨跌幅",
+                "f4": "涨跌额",
+                "f5": "成交量",
+                "f6": "成交额",
+                "f7": "振幅",
+                "f8": "换手率",
+                "f9": "动态市盈率",
+                "f10": "量比",
+                "f12": "代码",
+                "f13": "市场",
+                "f14": "名称",
+                "f15": "最高",
+                "f16": "最低",
+                "f17": "今开",
+                "f18": "昨收",
+                "f20": "总市值",
+                "f21": "流通市值",
+            }
+
+            rows = []
+            for item in items:
+                row = {}
+                for key, chinese in field_map.items():
+                    row[chinese] = item.get(key)
+                rows.append(row)
+
+            df = pd.DataFrame(rows)
+            if df.empty:
+                continue
+
+            result = _parse_spot_df(df)
+            # 如果 close 为 0（盘前可能），用昨收填充
+            if "close" in result.columns and "pre_close" in result.columns:
+                mask = result["close"] == 0
+                result.loc[mask, "close"] = result.loc[mask, "pre_close"]
+
+            logger.info("东财直连成功 (节点 %s)，共 %d 条", url[:40], len(result))
+            return result
+
+        except Exception as e:
+            logger.warning("东财节点 %s 失败: %s", url[:40], str(e))
+
+    logger.error("所有东财节点均失败")
+    return pd.DataFrame()
+
 
 
 def fetch_historical_daily(
@@ -84,59 +325,121 @@ def fetch_historical_daily(
     retries: int = 2,
 ) -> pd.DataFrame:
     """
-    获取单只股票历史日线数据（含重试）
+    获取单只股票历史日线数据
+    数据源: 新浪 → 腾讯 → akshare
     code: 纯数字代码（如 "600519"）
     """
+    prefix = "sh" if code.startswith("6") else "sz"
+    
+    # ---- 路径 1: 新浪历史 ----
+    try:
+        df = _sina_hist(code, prefix, days)
+        if not df.empty:
+            return df
+    except Exception:
+        logger.debug("sina hist failed for %s", code)
+
+    # ---- 路径 2: 腾讯历史 ----
+    try:
+        df = _tencent_hist(code, prefix, days)
+        if not df.empty:
+            return df
+    except Exception:
+        logger.debug("tencent hist failed for %s", code)
+
+    # ---- 路径 3: akshare stock_zh_a_daily ----
     for attempt in range(retries):
         try:
             import akshare as ak
-
-            start = (datetime.now() - timedelta(days=days + 30)).strftime("%Y%m%d")
-            end = datetime.now().strftime("%Y%m%d")
-
-            df = ak.stock_zh_a_hist(
-                symbol=code,
-                period=period,
-                start_date=start,
-                end_date=end,
-                adjust="qfq",
-            )
-            if df is None or df.empty:
-                if attempt < retries - 1:
-                    logger.debug("%s 历史日线为空，重试 %d/%d", code, attempt + 1, retries)
-                    continue
-                return pd.DataFrame()
-
-            df = df.rename(columns={
-                "日期": "date",
-                "开盘": "open",
-                "收盘": "close",
-                "最高": "high",
-                "最低": "low",
-                "成交量": "volume",
-                "成交额": "amount",
-                "换手率": "turnover_rate",
-            })
-
-            for col in ["open", "close", "high", "low", "volume", "amount"]:
-                if col in df.columns:
-                    df[col] = df[col].apply(_safe_float)
-
-            df["date"] = pd.to_datetime(df["date"])
-            df = df.sort_values("date").reset_index(drop=True)
-            return df.tail(days)
-
+            df = ak.stock_zh_a_daily(symbol=f"{prefix}{code}", adjust="qfq")
+            if df is not None and not df.empty:
+                df = df.rename(columns={
+                    "date": "date", "open": "open", "close": "close",
+                    "high": "high", "low": "low", "volume": "volume",
+                })
+                if "amount" in df.columns:
+                    pass  # keep it
+                for col in ["open", "close", "high", "low", "volume"]:
+                    if col in df.columns:
+                        df[col] = df[col].apply(_safe_float)
+                df["date"] = pd.to_datetime(df["date"])
+                df = df.sort_values("date").reset_index(drop=True)
+                return df.tail(days)
         except Exception:
             if attempt < retries - 1:
-                logger.debug("获取 %s 历史日线失败，重试 %d/%d", code, attempt + 1, retries)
                 continue
-            logger.debug("获取 %s 历史日线最终失败", code)
-            return pd.DataFrame()
+    return pd.DataFrame()
 
 
-# ============================================================
-# 财务数据
-# ============================================================
+def _sina_hist(code: str, prefix: str, days: int) -> pd.DataFrame:
+    """从新浪获取历史日线"""
+    import json as _json
+    url = (
+        f"http://money.finance.sina.com.cn/quotes_service/api/json_v2.php/"
+        f"CN_MarketData.getKLineData?symbol={prefix}{code}&scale=240&ma=no&datalen={days + 10}"
+    )
+    resp = requests.get(
+        url,
+        headers={"Referer": "https://finance.sina.com.cn"},
+        timeout=15,
+    )
+    resp.encoding = "gbk"
+    data = _json.loads(resp.text)
+    if not data or not isinstance(data, list):
+        return pd.DataFrame()
+    
+    rows = []
+    for item in data:
+        rows.append({
+            "date": item.get("day", ""),
+            "open": _safe_float(item.get("open")),
+            "high": _safe_float(item.get("high")),
+            "low": _safe_float(item.get("low")),
+            "close": _safe_float(item.get("close")),
+            "volume": _safe_float(item.get("volume")),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    return df.tail(days)
+
+
+def _tencent_hist(code: str, prefix: str, days: int) -> pd.DataFrame:
+    """从腾讯获取历史日线"""
+    import json as _json
+    url = (
+        f"http://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+        f"?param={prefix}{code},day,,,{days + 10},qfq"
+    )
+    resp = requests.get(url, timeout=15)
+    data = _json.loads(resp.text)
+    
+    qfqday = data.get("data", {}).get(f"{prefix}{code}", {}).get("qfqday", [])
+    if not qfqday:
+        return pd.DataFrame()
+    
+    rows = []
+    for item in qfqday:
+        if len(item) < 6:
+            continue
+        rows.append({
+            "date": item[0],
+            "open": _safe_float(item[1]),
+            "close": _safe_float(item[2]),
+            "high": _safe_float(item[3]),
+            "low": _safe_float(item[4]),
+            "volume": _safe_float(item[5]),
+        })
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"])
+    df = df.sort_values("date").reset_index(drop=True)
+    return df.tail(days)
+
+
 
 def fetch_financial_data(code: str) -> dict:
     """
@@ -180,24 +483,35 @@ def fetch_financial_data(code: str) -> dict:
         try:
             fin = ak.stock_financial_abstract_new_ths(symbol=code, indicator="按年度")
             if fin is not None and not fin.empty:
-                # 取最新一个完整年度
-                latest_year = fin["report_date"].max()
-                year_data = fin[fin["report_date"] == latest_year]
-                for _, row in year_data.iterrows():
-                    metric = row["metric_name"]
-                    val = row["value"]
-                    if metric == "index_weighted_avg_roe":
-                        result["roe"] = _safe_float(val)
-                    elif metric == "calculate_parent_holder_net_profit_yoy_growth_ratio":
-                        result["net_profit_growth"] = _safe_float(val)
-                    elif metric == "calculate_operating_income_total_yoy_growth_ratio":
-                        result["revenue_growth"] = _safe_float(val)
-                    elif metric == "sale_gross_margin":
-                        result["gross_margin"] = _safe_float(val)
-                    elif metric == "assets_debt_ratio":
-                        result["debt_ratio"] = _safe_float(val)
-                    elif metric == "index_per_operating_cash_flow_net":
-                        result["operating_cf"] = _safe_float(val)
+                # 取最近 3 个完整财年
+                years = sorted(fin["report_date"].unique(), reverse=True)[:3]
+                roe_3y = []
+                for yr in years:
+                    yr_data = fin[fin["report_date"] == yr]
+                    for _, row in yr_data.iterrows():
+                        metric = row["metric_name"]
+                        val = row["value"]
+                        if metric == "index_weighted_avg_roe":
+                            roe_3y.append(_safe_float(val))
+                        elif metric == "calculate_parent_holder_net_profit_yoy_growth_ratio":
+                            if yr == years[0]:  # 只取最新年度
+                                result["net_profit_growth"] = _safe_float(val)
+                        elif metric == "calculate_operating_income_total_yoy_growth_ratio":
+                            if yr == years[0]:
+                                result["revenue_growth"] = _safe_float(val)
+                        elif metric == "sale_gross_margin":
+                            if yr == years[0]:
+                                result["gross_margin"] = _safe_float(val)
+                        elif metric == "assets_debt_ratio":
+                            if yr == years[0]:
+                                result["debt_ratio"] = _safe_float(val)
+                        elif metric == "index_per_operating_cash_flow_net":
+                            if yr == years[0]:
+                                result["operating_cf"] = _safe_float(val)
+                # ROE: 最新年度值 + 3年均值
+                if roe_3y:
+                    result["roe"] = roe_3y[0]  # 最新年度
+                    result["roe_3y"] = roe_3y   # 3年列表
         except Exception:
             logger.debug("获取 %s 财务摘要失败", code)
 

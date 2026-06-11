@@ -36,7 +36,7 @@ from fundamentals import score_fundamentals
 
 logger = logging.getLogger(__name__)
 
-MAX_WORKERS = 6  # 并发数
+MAX_WORKERS = 10  # 并发数
 
 
 @dataclass
@@ -69,14 +69,14 @@ def run_screening(strategies=None) -> dict:
         logger.error("行情数据为空，终止筛选")
         return {"scalping": [], "swing": [], "value": []}
 
-    # 预过滤
-    quotes = _pre_filter(quotes)
-    logger.info("预过滤后剩余 %d 只标的", len(quotes))
+    # 快筛（秒级，只用收盘快照）
+    quotes = _fast_pre_filter(quotes)
+    logger.info("快筛后剩余 %d 只标的", len(quotes))
 
     results: dict = {s: [] for s in strategies}
 
     # 只做短线/波段需要技术指标（价值策略主要看基本面，但也需要行情价格）
-    codes = quotes[["code", "name", "close", "change_pct", "turnover_rate", "volume"]].to_dict("records")
+    codes = quotes[["code", "name", "close", "change_pct", "turnover_rate", "volume", "total_mv", "circ_mv"]].to_dict("records")
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {}
@@ -111,6 +111,23 @@ def run_screening(strategies=None) -> dict:
 # ============================================================
 # 内部
 # ============================================================
+
+def _fast_pre_filter(df: pd.DataFrame) -> pd.DataFrame:
+    """快筛：仅用收盘快照数据，不拉历史日线，秒级完成"""
+    df = df.copy()
+    # 排除 ST / 退市
+    df = df[~df.apply(lambda r: is_st_stock(r["code"], r["name"]), axis=1)]
+    # 基本有效性
+    df = df[(df["close"] > 0.01) & (df["volume"] > 0)]
+    # 涨跌幅合理区间（排除极端，正筛会有更严格的2%-9%）
+    df = df[(df["change_pct"] >= 2.0) & (df["change_pct"] <= 9.0)]
+    # 换手率 >= 2%（对齐短线策略）
+    df = df[df["turnover_rate"] >= 2.0]
+    # 排除低价垃圾股
+    df = df[df["close"] >= 2.0]
+    return df
+
+
 
 def _pre_filter(df: pd.DataFrame) -> pd.DataFrame:
     """粗筛：排除 ST、停牌、无效价格"""
@@ -262,6 +279,18 @@ def cross_ma5_desc(ma5, ma10, ma20) -> str:
 # 波段策略检查
 # ============================================================
 
+def _check_swing_fundamentals(code: str) -> bool:
+    """波段基本面: ROE > 10%, 营收增长 > 10%"""
+    try:
+        fin = fetch_financial_data(code)
+        roe = fin.get("roe", 0)
+        rg = fin.get("revenue_growth", 0)
+        return roe >= 10.0 and rg >= 10.0
+    except Exception:
+        return True  # 数据不可用时放行，不卡死
+
+
+
 def _check_swing(
     code: str,
     name: str,
@@ -306,6 +335,15 @@ def _check_swing(
     # 5. 成交量/5日均量 1.2-2.0
     vol_ratio = ind.get("vol_vs_5ma", 1.0)
     if not (SWING["min_vol_vs_5ma"] <= vol_ratio <= SWING["max_vol_vs_5ma"]):
+        return None
+
+    # 6. 流通市值 > 50 亿（替代机构持仓检查）
+    circ_mv = row.get("circ_mv", 0)
+    if circ_mv < 50:
+        return None
+
+    # 7. 基本面: ROE > 10%, 营收增长 > 10%
+    if not _check_swing_fundamentals(code):
         return None
 
     # 打分
@@ -392,10 +430,16 @@ def _check_value(row: dict) -> Candidate | None:
     if peg > VALUE["max_peg"]:
         return None
 
-    # 3. ROE > 15%
-    roe = fin.get("roe", 0)
-    if roe < VALUE["min_roe"]:
-        return None
+    # 3. ROE > 15%（连续3年）
+    roe_3y = fin.get("roe_3y", [])
+    if len(roe_3y) >= 3:
+        if not all(r >= VALUE["min_roe"] for r in roe_3y):
+            return None
+    else:
+        # 数据不足3年，用最新年度兜底
+        roe = fin.get("roe", 0)
+        if roe < VALUE["min_roe"]:
+            return None
 
     # 4. 资产负债率 < 50%
     dr = fin.get("debt_ratio", 100)

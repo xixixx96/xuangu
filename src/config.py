@@ -1,10 +1,20 @@
 """
 配置文件 — 所有敏感信息通过环境变量读取
-本地开发可在项目根目录创建 .env 文件
+本地开发可在项目根目录创建 .env 文件（自动加载）
 """
 
 import os
 from datetime import datetime
+from pathlib import Path
+
+# 自动加载项目根目录的 .env 文件
+_dotenv_path = Path(__file__).resolve().parent.parent / ".env"
+if _dotenv_path.exists():
+    try:
+        from dotenv import load_dotenv
+        load_dotenv(_dotenv_path)
+    except ImportError:
+        pass  # python-dotenv 未安装时静默跳过
 
 # ==================== 微信测试号配置 ====================
 WECHAT_APP_ID = os.getenv("WECHAT_APP_ID", "")
