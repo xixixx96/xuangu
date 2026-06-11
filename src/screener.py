@@ -127,8 +127,9 @@ def _fast_pre_filter(df: pd.DataFrame) -> pd.DataFrame:
     df = df[(df["close"] > 0.01) & (df["volume"] > 0)]
     # 涨跌幅合理区间（排除极端，正筛会有更严格的2%-9%）
     df = df[(df["change_pct"] >= 2.0) & (df["change_pct"] <= 9.0)]
-    # 换手率 >= 2%（对齐短线策略）
-    df = df[df["turnover_rate"] >= 2.0]
+    # 换手率 >= 2%（仅当数据源提供时过滤；新浪不提供换手率，全为0则跳过）
+    if df["turnover_rate"].max() > 0:
+        df = df[df["turnover_rate"] >= 2.0]
     # 排除低价垃圾股
     df = df[df["close"] >= 2.0]
     return df
@@ -343,9 +344,9 @@ def _check_swing(
     if not (SWING["min_vol_vs_5ma"] <= vol_ratio <= SWING["max_vol_vs_5ma"]):
         return None
 
-    # 6. 流通市值 > 50 亿（替代机构持仓检查）
+    # 6. 流通市值 > 50 亿（仅当数据源提供时检查；不提供时跳过）
     circ_mv = row.get("circ_mv", 0)
-    if circ_mv < 50:
+    if circ_mv > 0 and circ_mv < 50:
         return None
 
     # 7. 基本面: ROE > 10%, 营收增长 > 10%
